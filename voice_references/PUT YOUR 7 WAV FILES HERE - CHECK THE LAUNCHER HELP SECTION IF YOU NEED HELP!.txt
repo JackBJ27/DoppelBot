@@ -1,0 +1,21 @@
+PUT YOUR 7 WAV FILES HERE - CHECK THE LAUNCHER HELP 
+SECTION IF YOU NEED HELP!
+
+reference.wav
+excited_reference.wav
+anxious_reference.wav
+angry_reference.wav
+dead_inside_reference.wav
+bored_reference.wav
+sad_reference.wav
+
+
+
+you can also put other voice clips in here to 
+have it say on loop as it loads the voice ai models in
+(they must be named these)
+------
+warming_up.wav
+wait.wav
+still_loading.wav
+almost_there.wav

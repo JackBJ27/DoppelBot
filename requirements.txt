@@ -1,0 +1,17 @@
+customtkinter
+Pillow
+py-cord
+PyNaCl
+SpeechRecognition
+requests
+edge-tts
+pydub
+scipy
+python-dotenv
+ddgs
+huggingface_hub
+davey
+torch
+torchaudio
+transformers
+pocket-tts
