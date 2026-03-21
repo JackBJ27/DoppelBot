@@ -671,7 +671,7 @@ HTML_TEMPLATE = """
 
                 async fetchGithub() {
                     try {
-                        const repo = this.config.github_repo_url.replace(/\/$/, '');
+                        const repo = this.config.github_repo_url.replace(/\\/$/, '');
                         const [tags, branches] = await Promise.all([
                             fetch(`https://api.github.com/repos/${repo}/tags`).then(r=>r.json()),
                             fetch(`https://api.github.com/repos/${repo}/branches`).then(r=>r.json())
