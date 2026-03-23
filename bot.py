@@ -4,6 +4,8 @@ import requests
 import random
 import asyncio
 import os
+import atexit
+import glob
 import functools
 import time
 import re
@@ -11,6 +13,7 @@ import json
 from datetime import datetime, timezone
 import logging
 from dotenv import load_dotenv
+
 
 logging.getLogger('discord.voice_client').setLevel(logging.CRITICAL)
 import warnings
@@ -149,7 +152,7 @@ def start_thinking_music(vc):
             ffmpeg_path = os.path.join(SCRIPT_DIR, 'ffmpeg.exe')
             executable = ffmpeg_path if os.path.exists(ffmpeg_path) else 'ffmpeg'
             source = discord.PCMVolumeTransformer(discord.FFmpegPCMAudio(music_file, executable=executable))
-            source.volume = 0.08
+            source.volume = 0.15
             vc.play(source)
         except Exception as e:
             dprint("voice", f"   -> [VOICE DEBUG] Failed to play thinking music: {e}")
@@ -193,14 +196,35 @@ def load_stats():
 def save_stats(stats):
     with open(STATS_FILE, 'w') as f: json.dump(stats, f)
 
-def check_and_update_stats(user_name, text):
+async def check_and_update_stats(user_name, text):
     if not ENABLE_STATS or not CUSTOM_STATS: return None
     stats = load_stats()
     text_lower = text.lower()
     triggered_msg = None
     for stat in CUSTOM_STATS:
         if user_name.lower() == stat.get("user", "").lower():
-            if any(trigger in text_lower for trigger in stat.get("triggers", [])):
+            if any(re.search(rf'\b{re.escape(trigger)}\b', text_lower) for trigger in stat.get("triggers", [])):
+                
+                is_valid = True
+                if ACTIVE_MODEL and GOOGLE_API_KEYS:
+                    def _check():
+                        try:
+                            current_key = GOOGLE_API_KEYS[CURRENT_KEY_INDEX]
+                            url = f"https://generativelanguage.googleapis.com/v1beta/models/{ACTIVE_MODEL}:generateContent?key={current_key}"
+                            prompt = f"Does this message logically and contextually relate to the topic of '{stat['stat_name']}'? Message: '{text}'. Answer ONLY 'yes' or 'no'."
+                            payload = {"contents": [{"parts": [{"text": prompt}]}]}
+                            res = requests.post(url, json=payload, timeout=5)
+                            if res.status_code == 200:
+                                reply = res.json()['candidates'][0]['content']['parts'][0]['text'].strip().lower()
+                                if 'no' in reply and 'yes' not in reply:
+                                    return False
+                        except: pass
+                        return True
+                        
+                    is_valid = await client.loop.run_in_executor(None, _check)
+                    
+                if not is_valid: continue
+
                 stat_key = stat["stat_name"]
                 if stat_key not in stats: stats[stat_key] = 0
                 stats[stat_key] += 1
@@ -546,7 +570,7 @@ async def handle_transcription(user_id, text, vc_client, forced_emotion=None):
 
     last_time = STAT_COOLDOWNS.get(user_id, 0)
     if time.time() - last_time > STAT_COOLDOWN_TIME:
-        stat_announcement = check_and_update_stats(user_name, clean_text)
+        stat_announcement = await check_and_update_stats(user_name, clean_text)
         if stat_announcement and PRIMARY_CHANNEL_ID:
             STAT_COOLDOWNS[user_id] = time.time()
             dprint("stats", f"   -> [STATS] Triggered in VC: {stat_announcement}")
@@ -774,9 +798,10 @@ async def vocal_cord_progress():
 
 @client.event
 async def on_ready():
+    global LAST_RESET_TIMESTAMP
+    LAST_RESET_TIMESTAMP = time.time()
+    
     print(f'--- {BOT_NAME} is Online! ---')
-    open(VC_BRAIN_FILE, 'w').close()
-    dprint("events", "[DEBUG] Wiped VC memory for a fresh start.")
     
     await client.loop.run_in_executor(None, find_working_model)
     
@@ -878,7 +903,7 @@ async def on_message(message):
         if text_btns:
             components.append({
                 "type": 10,
-                "content": f"**--- {BOT_NAME.lower()} command menu ---**\n\n**text settings:**\n`@{BOT_NAME.lower()} stop/shush` - makes me ignore the current topic."
+                "content": f"**--- {BOT_NAME.lower()} command menu ---**\n\n**text settings:**\n`@{BOT_NAME.lower()} stop/shush` - makes me ignore the current topic.\n`@{BOT_NAME.lower()} stats` - prints out the current custom stats."
             })
             components.append({"type": 1, "components": text_btns})
 
@@ -926,21 +951,57 @@ async def on_message(message):
         return
     
     if ("join" in content_lower or "get in" in content_lower) and client.user in message.mentions:
-        target_vc_id = message.author.voice.channel.id if message.author.voice else None
+        target_vc = None
         
+        raw_vcs = config.get("allowed_vc_channels", {})
+        target_vc_id = None
+        for vc_id_str, alias in raw_vcs.items():
+            if vc_id_str in content_lower or alias.lower() in content_lower:
+                target_vc_id = int(vc_id_str)
+                break
+                
         if target_vc_id:
-            chan = client.get_channel(int(target_vc_id))
-            if chan:
-                vc = await chan.connect()
-                if VOCAL_CORDS_READY: await generate_and_play_tts(vc, MSG_JOIN_VC, "default")
-                else: client.loop.create_task(play_stalling_audio(vc))
-                client.loop.create_task(voice_listening_loop(vc))
-                await message.channel.send(f"joining {chan.name} - get ready.")
-                return
-            else:
-                await message.channel.send("i can't find that channel id in this server.")
+            target_vc = client.get_channel(target_vc_id)
+
+        if not target_vc:
+            for guild in client.guilds:
+                for vc in guild.voice_channels:
+                    if vc.name.lower() in content_lower:
+                        target_vc = vc
+                        break
+                if target_vc: break
+
+        if not target_vc:
+            for guild in client.guilds:
+                member = guild.get_member(message.author.id)
+                if member and member.voice and member.voice.channel:
+                    target_vc = member.voice.channel
+                    break
+
+        if target_vc:
+            try:
+                if client.voice_clients:
+                    current_vc = client.voice_clients[0]
+                    if current_vc.guild == target_vc.guild:
+                        await current_vc.move_to(target_vc)
+                        vc_client = current_vc
+                    else:
+                        await current_vc.disconnect()
+                        vc_client = await target_vc.connect()
+                        if VOCAL_CORDS_READY: await generate_and_play_tts(vc_client, MSG_JOIN_VC, "default")
+                        else: client.loop.create_task(play_stalling_audio(vc_client))
+                        client.loop.create_task(voice_listening_loop(vc_client))
+                else:
+                    vc_client = await target_vc.connect()
+                    if VOCAL_CORDS_READY: await generate_and_play_tts(vc_client, MSG_JOIN_VC, "default")
+                    else: client.loop.create_task(play_stalling_audio(vc_client))
+                    client.loop.create_task(voice_listening_loop(vc_client))
+                    
+                await message.channel.send(f"joining {target_vc.name} in {target_vc.guild.name}...")
+            except discord.errors.Forbidden:
+                await message.channel.send(f"i don't have permission to join `{target_vc.name}` in {target_vc.guild.name} man.")
         else:
-            await message.channel.send("set a primary channel in the dashboard first.")
+            await message.channel.send("i searched every server but couldn't find you in a VC, and you didn't name a channel i know.")
         return
 
     if message.guild:
@@ -948,7 +1009,7 @@ async def on_message(message):
         user_name = VIP_MAP.get(message.author.id, display_name)
         last_time = STAT_COOLDOWNS.get(message.author.id, 0)
         if time.time() - last_time > STAT_COOLDOWN_TIME:
-            stat_announcement = check_and_update_stats(user_name, message.content)
+            stat_announcement = await check_and_update_stats(user_name, message.content)
             if stat_announcement:
                 STAT_COOLDOWNS[message.author.id] = time.time() 
                 await message.channel.send(replace_emojis(stat_announcement))
@@ -960,17 +1021,34 @@ async def on_message(message):
 
     stop_keywords = ["stop", "shush", "shut up", "silence", "shut"]
     if client.user in message.mentions:
-        clean_content = content_lower.replace(f"<@{client.user.id}>", "").strip()
+        clean_content = re.sub(r'<@!?\d+>', '', content_lower).strip()
         
         if any(clean_content == w for w in stop_keywords):
             await message.channel.send(replace_emojis(MSG_STOP_TALKING))
             return
             
-        if clean_content == "reset" or "reset memory" in clean_content:
+        if "reset" in clean_content:
             LAST_RESET_TIMESTAMP = time.time()
             await message.channel.send(replace_emojis(MSG_MEMORY_RESET))
             return
-
+            
+        if clean_content == "stats":
+            stats_data = load_stats()
+            if not stats_data:
+                await message.channel.send("no stats tracked yet man.")
+            else:
+                lines = []
+                for k, v in stats_data.items():
+                    alias = k
+                    for stat_def in CUSTOM_STATS:
+                        if stat_def.get("stat_name") == k:
+                            alias = stat_def.get("alias", k)
+                            break
+                    lines.append(f"- {alias}: {v}")
+                stat_msg = "** - current stats - **\n" + "\n".join(lines)
+                await message.channel.send(stat_msg)
+            return
+            
     should_reply = False
     is_reply_ref = (message.reference and message.reference.resolved and message.reference.resolved.author == client.user)
     
@@ -1024,6 +1102,26 @@ async def on_message(message):
                 response = replace_emojis(AUTO_REPLIES[found_game])
                 await message.channel.send(response)
                 return
+
+def cleanup_audio_trash():
+    print("sweeping up leftover audio and scrubbing brain...")
+    
+    try:
+        resp_path = os.path.join(SCRIPT_DIR, "response.wav")
+        if os.path.exists(resp_path):
+            os.remove(resp_path)
+    except: pass
+    
+    for file in glob.glob(os.path.join(SCRIPT_DIR, "converted_*.wav")):
+        try:
+            os.remove(file)
+        except: pass
+        
+    try:
+        open(VC_BRAIN_FILE, 'w').close()
+    except: pass
+
+atexit.register(cleanup_audio_trash)
 
 if DISCORD_TOKEN: client.run(DISCORD_TOKEN)
 else: print("Error: DISCORD_TOKEN is missing!")
