@@ -1283,6 +1283,10 @@ class App(ctk.CTk):
         self.stat_name = ctk.CTkEntry(f, font=APP_FONT, fg_color=TEXT_BG)
         self.stat_name.pack(fill='x', padx=10, pady=(0, 5))
         
+        ctk.CTkLabel(f, text='Stat Alias (Display name. ex: Rage Quits)', font=APP_FONT, fg_color=BG_FRAME).pack(anchor='w', padx=10)
+        self.stat_alias = ctk.CTkEntry(f, font=APP_FONT, fg_color=TEXT_BG)
+        self.stat_alias.pack(fill='x', padx=10, pady=(0, 5))
+        
         ctk.CTkLabel(f, text='Target User (Must match a Name from your Friends List exactly)', font=APP_FONT, fg_color=BG_FRAME).pack(anchor='w', padx=10)
         self.stat_user = ctk.CTkEntry(f, font=APP_FONT, fg_color=TEXT_BG)
         self.stat_user.pack(fill='x', padx=10, pady=(0, 5))
@@ -1795,6 +1799,7 @@ CREDITS & LICENSING:
     def add_stat(self):
         new_stat = {
             'stat_name': self.stat_name.get().strip(),
+            'alias': getattr(self, 'stat_alias', self.stat_name).get().strip() or self.stat_name.get().strip(),
             'user': self.stat_user.get().strip(),
             'triggers': [x.strip() for x in self.stat_triggers.get().split(',') if x.strip()],
             'message': self.stat_msg.get().strip()
@@ -1806,7 +1811,7 @@ CREDITS & LICENSING:
         stats_list.append(new_stat)
         self.config_data['custom_stats'] = stats_list
         save_config(self.config_data)
-        self.stat_name.delete(0, 'end'); self.stat_triggers.delete(0, 'end'); self.stat_msg.delete(0, 'end')
+        self.stat_name.delete(0, 'end'); self.stat_alias.delete(0, 'end'); self.stat_user.delete(0, 'end'); self.stat_triggers.delete(0, 'end'); self.stat_msg.delete(0, 'end')
         self.stat_preview.delete('1.0', 'end'); self.stat_preview.insert('1.0', json.dumps(self.config_data.get('custom_stats', []), indent=2))
         self.save_all_silent()
         self.stat_preview._textbox.event_generate("<KeyRelease>")
