@@ -66,7 +66,7 @@ def save_config(data):
     with open(CONFIG_FILE, 'w') as f:
         json.dump(data, f, indent=2)
 
-HTML_TEMPLATE = """
+HTML_TEMPLATE = r"""
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -368,9 +368,10 @@ HTML_TEMPLATE = """
                             <label class="d-flex align-items-center mt-2 mb-3"><label class="switch"><input type="checkbox" v-model="config.enable_stats"><span class="slider"></span></label> Enable Custom Stats Globally</label>
 
                             <div class="ctk-frame mb-4">
-                                <div class="row g-2">
-                                    <div class="col-md-6"><label class="ctk-info">Stat ID (ex: rage_quits)</label><input type="text" class="ctk-input" id="s_id"></div>
-                                    <div class="col-md-6"><label class="ctk-info">Target User (Must match VIP name)</label><input type="text" class="ctk-input" id="s_usr"></div>
+<div class="row g-2">
+                                    <div class="col-md-4"><label class="ctk-info">Stat ID (ex: rage_quits)</label><input type="text" class="ctk-input" id="s_id"></div>
+                                    <div class="col-md-4"><label class="ctk-info">Stat Alias (ex: Rage Quits)</label><input type="text" class="ctk-input" id="s_alias"></div>
+                                    <div class="col-md-4"><label class="ctk-info">Target User (Must match VIP name)</label><input type="text" class="ctk-input" id="s_usr"></div>
                                     <div class="col-md-12"><label class="ctk-info">Trigger Words (Comma separated)</label><input type="text" class="ctk-input" id="s_trig"></div>
                                     <div class="col-md-12"><label class="ctk-info">Bot Output Message (Use {count})</label><input type="text" class="ctk-input mb-2" id="s_msg"></div>
                                     <div class="col-md-12"><button class="ctk-btn ctk-btn-save" @click="addStat">Add Stat to Bot</button></div>
@@ -650,18 +651,21 @@ HTML_TEMPLATE = """
 
                 addStat() {
                     const id = document.getElementById('s_id').value;
+                    const alias = document.getElementById('s_alias').value;
                     const usr = document.getElementById('s_usr').value;
                     const trig = document.getElementById('s_trig').value;
                     const msg = document.getElementById('s_msg').value;
                     if(id && trig) {
                         this.config.custom_stats.push({
                             stat_name: id.trim(),
+                            alias: alias.trim() || id.trim(),
                             user: usr.trim(),
                             triggers: trig.split(',').map(s=>s.trim()).filter(Boolean),
                             message: msg.trim()
                         });
                         this.saveData();
                         document.getElementById('s_id').value = '';
+                        document.getElementById('s_alias').value = '';
                         document.getElementById('s_usr').value = '';
                         document.getElementById('s_trig').value = '';
                         document.getElementById('s_msg').value = '';
@@ -671,7 +675,7 @@ HTML_TEMPLATE = """
 
                 async fetchGithub() {
                     try {
-                        const repo = this.config.github_repo_url.replace(/\\/$/, '');
+                        const repo = this.config.github_repo_url.replace(/\/$/, '');
                         const [tags, branches] = await Promise.all([
                             fetch(`https://api.github.com/repos/${repo}/tags`).then(r=>r.json()),
                             fetch(`https://api.github.com/repos/${repo}/branches`).then(r=>r.json())
@@ -737,7 +741,7 @@ HTML_TEMPLATE = """
 
 @app.route('/')
 def index():
-    return render_template_string(HTML_TEMPLATE)
+    return HTML_TEMPLATE
 
 @app.route('/api/data')
 def api_data():
