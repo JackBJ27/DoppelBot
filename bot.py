@@ -747,6 +747,22 @@ async def on_interaction(interaction):
             LAST_RESET_TIMESTAMP = datetime.now(timezone.utc).timestamp()
             await interaction.response.send_message(replace_emojis(MSG_MEMORY_RESET), ephemeral=EPHEMERAL_CMDS)
             
+        elif custom_id == "cmd_show_stats":
+            stats_data = load_stats()
+            if not stats_data:
+                await interaction.response.send_message("no stats tracked yet man.", ephemeral=EPHEMERAL_CMDS)
+            else:
+                lines = []
+                for k, v in stats_data.items():
+                    alias = k
+                    for stat_def in CUSTOM_STATS:
+                        if stat_def.get("stat_name") == k:
+                            alias = stat_def.get("alias", k)
+                            break
+                    lines.append(f"- {alias}: {v}")
+                stat_msg = "** - current stats - **\n" + "\n".join(lines)
+                await interaction.response.send_message(stat_msg, ephemeral=EPHEMERAL_CMDS)
+            
         elif custom_id == "cmd_vc_on":
             VC_ENABLED = True
             await interaction.response.send_message("Voice processing: ON. I'm listening.", ephemeral=EPHEMERAL_CMDS)
@@ -899,6 +915,8 @@ async def on_message(message):
             ])
         if "Reset Text Memory" in ENABLED_CMDS:
             text_btns.append({"type": 2, "style": 4, "label": "Reset Text Memory", "custom_id": "cmd_reset_text"})
+
+        text_btns.append({"type": 2, "style": 2, "label": "Show Stats", "custom_id": "cmd_show_stats"})
 
         if text_btns:
             components.append({
