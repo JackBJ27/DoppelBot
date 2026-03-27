@@ -25,13 +25,17 @@ from pydub import AudioSegment
 from ddgs import DDGS
 import scipy.io.wavfile
 
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-load_dotenv(os.path.join(SCRIPT_DIR, ".env"))
+import io
+import keyring
 
-DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
-raw_keys = os.getenv("GOOGLE_API_KEYS", "")
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+
+DISCORD_TOKEN = keyring.get_password("DoppelBot", "DISCORD_TOKEN")
+raw_keys = keyring.get_password("DoppelBot", "GOOGLE_API_KEYS") or ""
 GOOGLE_API_KEYS = [k.strip() for k in raw_keys.split(",") if k.strip()]
 CURRENT_KEY_INDEX = 0
+
+GLOBAL_EMOJI_CACHE = {}
 
 config_path = os.path.join(SCRIPT_DIR, "config.json")
 if os.path.exists(config_path):
@@ -246,30 +250,21 @@ def sanitize_text_for_ai(text):
 
 def replace_emojis(text):
     if not text or ":" not in text: return text
-    try:
-        with open(os.path.join(SCRIPT_DIR, "fetched_emojis.json"), "r", encoding="utf-8") as f:
-            fetched_emojis = json.load(f)
-        for server_name, emojis in fetched_emojis.items():
-            for e_id, e_data in emojis.items():
-                text = text.replace(f":{e_data['name']}:", e_data["code"])
-    except: pass
+    for server_name, emojis in GLOBAL_EMOJI_CACHE.items():
+        for e_id, e_data in emojis.items():
+            text = text.replace(f":{e_data['name']}:", e_data["code"])
     return text
 
 def cleanup_response(text):
     text = re.sub(r'<[^:>]+>', '', text)
+    emoji_toggles = config.get("emoji_toggles", {})
     
-    try:
-        with open(os.path.join(SCRIPT_DIR, "fetched_emojis.json"), "r", encoding="utf-8") as f:
-            fetched_emojis = json.load(f)
-        emoji_toggles = config.get("emoji_toggles", {})
-        
-        for server_name, emojis in fetched_emojis.items():
-            for e_id, e_data in emojis.items():
-                if emoji_toggles.get(e_id, True):
-                    code = e_data["code"]
-                    name = e_data["name"]
-                    text = text.replace(f":{name}:", code)
-    except: pass
+    for server_name, emojis in GLOBAL_EMOJI_CACHE.items():
+        for e_id, e_data in emojis.items():
+            if emoji_toggles.get(e_id, True):
+                code = e_data["code"]
+                name = e_data["name"]
+                text = text.replace(f":{name}:", code)
 
     for uid, name in VIP_MAP.items():
         if f"@{name}" in text or f"@{name.lower()}" in text: text = re.sub(f"@{name}", f"<@{uid}>", text, flags=re.IGNORECASE)
@@ -329,16 +324,13 @@ def get_ai_reply(current_user, conversation_history, random_memories, soul_text,
     else: action_target = f"*** TARGET MESSAGE (REPLY TO THIS) ***\n{current_user}: \"{target_message}\""
 
     try:
-        with open(os.path.join(SCRIPT_DIR, "fetched_emojis.json"), "r", encoding="utf-8") as f:
-            fetched_emojis = json.load(f)
-            
         emoji_toggles = config.get("emoji_toggles", {})
         fav_emojis_ids = config.get("favorite_emojis", [])
         
         fav_list = []
         other_list = []
         
-        for server_name, emojis in fetched_emojis.items():
+        for server_name, emojis in GLOBAL_EMOJI_CACHE.items():
             for k, e in emojis.items():
                 if emoji_toggles.get(k, True):
                     formatted = f":{e['name']}:"
@@ -450,6 +442,7 @@ def get_ai_reply(current_user, conversation_history, random_memories, soul_text,
 
 async def fetch_emojis():
     await client.wait_until_ready()
+    global GLOBAL_EMOJI_CACHE
     emojis_data = {}
     server_list = []
     cache_dir = os.path.join(SCRIPT_DIR, "emoji_cache")
@@ -476,6 +469,8 @@ async def fetch_emojis():
         
     with open(os.path.join(SCRIPT_DIR, "bot_servers.json"), "w", encoding="utf-8") as f:
         json.dump(server_list, f)
+        
+    GLOBAL_EMOJI_CACHE = emojis_data
 
 tts_model = None
 voice_states = {}
@@ -643,12 +638,12 @@ async def process_audio_chunk(sink, channel, *args):
         raw_pcm_data = audio.file.read()
         if len(raw_pcm_data) < 1000: continue
             
-        chunk_id = random.randint(100000, 999999)
-        converted_path = os.path.join(SCRIPT_DIR, f"converted_{user_id}_{chunk_id}.wav")
         try:
             sound = AudioSegment(data=raw_pcm_data, sample_width=2, frame_rate=48000, channels=2)
             sound = sound.set_channels(1).set_frame_rate(16000)
-            sound.export(converted_path, format="wav")
+            wav_io = io.BytesIO()
+            sound.export(wav_io, format="wav")
+            wav_io.seek(0)
         except: continue
         
         r = sr.Recognizer()
@@ -656,11 +651,9 @@ async def process_audio_chunk(sink, channel, *args):
         r.dynamic_energy_threshold = False
         
         try:
-            with sr.AudioFile(converted_path) as source: audio_data = r.record(source)
+            with sr.AudioFile(wav_io) as source: audio_data = r.record(source)
             text = await client.loop.run_in_executor(None, r.recognize_google, audio_data)
             if text and text.strip(): client.loop.create_task(handle_transcription(user_id, text, vc_client))
-        except: pass
-        try: os.remove(converted_path)
         except: pass
 
 async def voice_listening_loop(vc):
@@ -828,6 +821,12 @@ async def on_ready():
     client.loop.create_task(fetch_emojis())
     client.loop.create_task(auto_chat_loop())
 
+    try:
+        with open(os.path.join(SCRIPT_DIR, "fetched_emojis.json"), "r", encoding="utf-8") as f:
+            global GLOBAL_EMOJI_CACHE
+            GLOBAL_EMOJI_CACHE = json.load(f)
+    except: pass
+
 @client.event
 async def on_voice_state_update(member, before, after):
     global VC_ENABLED, AUTO_JOIN_VC, VOCAL_CORDS_READY
@@ -916,7 +915,7 @@ async def on_message(message):
         if "Reset Text Memory" in ENABLED_CMDS:
             text_btns.append({"type": 2, "style": 4, "label": "Reset Text Memory", "custom_id": "cmd_reset_text"})
 
-        text_btns.append({"type": 2, "style": 2, "label": "Show Stats", "custom_id": "cmd_show_stats"})
+        text_btns.append({"type": 2, "style": 2, "label": "show stats", "custom_id": "cmd_show_stats"})
 
         if text_btns:
             components.append({
