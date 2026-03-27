@@ -3,6 +3,7 @@ import json
 import subprocess
 import sys
 import requests
+import psutil
 from flask import Flask, render_template_string, request, jsonify
 
 app = Flask(__name__)
@@ -23,22 +24,19 @@ def get_mtime():
     e_time = os.path.getmtime(ENV_FILE) if os.path.exists(ENV_FILE) else 0
     return max(c_time, e_time)
 
+import keyring
+
 def load_env():
-    keys = {'DISCORD_TOKEN': '', 'GOOGLE_API_KEYS': '', 'HF_TOKEN': ''}
-    target = ENV_FILE if os.path.exists(ENV_FILE) else os.path.join(SCRIPT_DIR, 'env')
-    if os.path.exists(target):
-        with open(target, 'r') as f:
-            for line in f:
-                if '=' in line:
-                    k, v = line.split('=', 1)
-                    k = k.strip()
-                    v = v.strip().strip("'").strip('"')
-                    if k in keys: keys[k] = v
-    return keys
+    return {
+        'DISCORD_TOKEN': keyring.get_password("DoppelBot", "DISCORD_TOKEN") or '',
+        'GOOGLE_API_KEYS': keyring.get_password("DoppelBot", "GOOGLE_API_KEYS") or '',
+        'HF_TOKEN': keyring.get_password("DoppelBot", "HF_TOKEN") or ''
+    }
 
 def save_env(discord, google, hf):
-    with open(ENV_FILE, 'w') as f:
-        f.write(f'DISCORD_TOKEN={discord}\nGOOGLE_API_KEYS={google}\nHF_TOKEN={hf}\n')
+    if discord: keyring.set_password("DoppelBot", "DISCORD_TOKEN", discord)
+    if google: keyring.set_password("DoppelBot", "GOOGLE_API_KEYS", google)
+    if hf: keyring.set_password("DoppelBot", "HF_TOKEN", hf)
 
 def load_config():
     default_config = {
@@ -171,7 +169,9 @@ HTML_TEMPLATE = r"""
             </div>
 
             <div class="px-4 pb-3 flex-shrink-0">
-                <button class="ctk-btn ctk-btn-start w-100 py-3 fs-4" @click="startBot">START BOT</button>
+                <button :class="['ctk-btn', 'w-100', 'py-3', 'fs-4', botRunning ? 'ctk-btn-save' : 'ctk-btn-start']" @click="startBot">
+                    {{ botRunning ? 'BOT IS RUNNING (TERMINAL OPEN)' : 'START BOT' }}
+                </button>
             </div>
 
             <div class="row px-4 m-0 main-split" v-if="!loading">
@@ -509,6 +509,7 @@ HTML_TEMPLATE = r"""
         createApp({
             data() {
                 return {
+                    botRunning: false,
                     isSyncing: false,
                     loading: true,
                     env: { DISCORD_TOKEN: '', GOOGLE_API_KEYS: '', HF_TOKEN: '' },
@@ -603,8 +604,17 @@ HTML_TEMPLATE = r"""
                 },
 
                 async startBot() {
-                    await fetch('/api/run_script', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({script: 'bot.py'}) });
-                    alert('Bot terminal launched!');
+                    if (this.botRunning) {
+                        alert('The bot is already running! Check your taskbar for the open terminal window.');
+                        return;
+                    }
+                    const res = await fetch('/api/run_script', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({script: 'bot.py'}) });
+                    if (!res.ok) {
+                        const data = await res.json();
+                        alert(data.error || 'Failed to start bot.');
+                        return;
+                    }
+                    this.botRunning = true;
                 },
 
                 async runScript(name) {
@@ -727,7 +737,10 @@ HTML_TEMPLATE = r"""
                             }
                         })
                         .catch(() => {})
-                        .finally(() => { setTimeout(this.poll, 2000); });
+                        .finally(() => { 
+                            fetch('/api/bot_status').then(r => r.json()).then(d => { this.botRunning = d.running; }).catch(()=>{});
+                            setTimeout(this.poll, 2000); 
+                        });
                 }
             },
             mounted() {
@@ -763,9 +776,36 @@ def api_save():
 def api_poll():
     return jsonify({'mtime': get_mtime()})
 
+@app.route('/api/bot_status')
+def api_bot_status():
+    running = False
+    for p in psutil.process_iter(['name', 'cmdline']):
+        try:
+            if p.info['cmdline'] and any('bot.py' in arg for arg in p.info['cmdline']):
+                name = p.info['name'].lower()
+                if 'python' in name or 'py.exe' in name or 'py' in name:
+                    running = True
+                    break
+        except: pass
+    return jsonify({'running': running})
+
 @app.route('/api/run_script', methods=['POST'])
 def api_run_script():
     script = request.json.get('script')
+    allowed_scripts = ['bot.py', 'launcher.py', 'mine_discord_data.py', 'generate_soul.py']
+    
+    if script not in allowed_scripts:
+        return jsonify({'success': False, 'error': 'Unauthorized script.'}), 403
+        
+    if script == 'bot.py':
+        for p in psutil.process_iter(['name', 'cmdline']):
+            try:
+                if p.info['cmdline'] and any('bot.py' in arg for arg in p.info['cmdline']):
+                    name = p.info['name'].lower()
+                    if 'python' in name or 'py.exe' in name or 'py' in name:
+                        return jsonify({'success': False, 'error': 'Bot is already running!'}), 400
+            except: pass
+            
     if sys.platform.startswith('win'):
         cmd = f'start "DoppelBot Web Terminal" cmd /k "py -3.13 {script}"'
         subprocess.Popen(cmd, shell=True)
@@ -812,6 +852,11 @@ def api_github():
 @app.route('/api/file', methods=['GET', 'POST'])
 def handle_file():
     name = request.args.get('name') if request.method == 'GET' else request.json.get('name')
+    allowed_files = ['config.json', 'bot.py', 'soul.txt', 'bot_brain.txt', 'vc_history.txt']
+    
+    if name not in allowed_files:
+        return jsonify({'content': 'Unauthorized access.', 'message': 'Unauthorized access.'}), 403
+        
     path = os.path.join(SCRIPT_DIR, name)
     if request.method == 'GET':
         if os.path.exists(path):
