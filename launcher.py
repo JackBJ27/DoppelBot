@@ -10,6 +10,7 @@ import webbrowser
 import requests
 import zipfile
 import time
+import psutil
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -52,32 +53,19 @@ def ensure_files_exist():
         if not os.path.exists(f):
             open(f, 'w', encoding='utf-8').close()
 
-def load_env():
-    keys = {'DISCORD_TOKEN': '', 'GOOGLE_API_KEYS': '', 'HF_TOKEN': ''}
-    
-    target_file = ENV_FILE
-    
-    if not os.path.exists(target_file):
-        fallback_file = os.path.join(SCRIPT_DIR, 'env')
-        if os.path.exists(fallback_file):
-            target_file = fallback_file
-        else:
-            return keys
+import keyring
 
-    with open(target_file, 'r') as f:
-        for line in f:
-            if '=' in line:
-                k, v = line.split('=', 1)
-                k = k.strip()
-                v = v.strip().strip("'").strip('"') 
-                if k in keys: keys[k] = v
-                
-    return keys
+def load_env():
+    return {
+        'DISCORD_TOKEN': keyring.get_password("DoppelBot", "DISCORD_TOKEN") or '',
+        'GOOGLE_API_KEYS': keyring.get_password("DoppelBot", "GOOGLE_API_KEYS") or '',
+        'HF_TOKEN': keyring.get_password("DoppelBot", "HF_TOKEN") or ''
+    }
 
 def save_env(discord, google, hf):
-    if discord or google or hf:
-        with open(ENV_FILE, 'w') as f:
-            f.write(f'DISCORD_TOKEN={discord}\nGOOGLE_API_KEYS={google}\nHF_TOKEN={hf}\n')
+    if discord: keyring.set_password("DoppelBot", "DISCORD_TOKEN", discord)
+    if google: keyring.set_password("DoppelBot", "GOOGLE_API_KEYS", google)
+    if hf: keyring.set_password("DoppelBot", "HF_TOKEN", hf)
 
 def load_config():
     ensure_files_exist()
@@ -194,7 +182,17 @@ def run_script(script_name):
     if not os.path.exists(os.path.join(SCRIPT_DIR, script_name)):
         show_popup('Error', f'Could not find {script_name}!')
         return
-        
+
+    if script_name == 'bot.py':
+        for p in psutil.process_iter(['name', 'cmdline']):
+            try:
+                if p.info['cmdline'] and any('bot.py' in arg for arg in p.info['cmdline']):
+                    name = p.info['name'].lower()
+                    if 'python' in name or 'py.exe' in name or 'py' in name:
+                        show_popup('Notice', 'The bot is already running! Check your taskbar for the open terminal window.')
+                        return
+            except: pass
+
     if sys.platform.startswith('win'):
         cmd_chain = f'py -3.13 -c "import dotenv" 2>nul || py -3.13 -m pip install -q -r requirements.txt & py -3.13 {script_name}'
         subprocess.Popen(f'start "DoppelBot Terminal" cmd /k "{cmd_chain}"', shell=True)
@@ -283,6 +281,7 @@ class App(ctk.CTk):
         
         self.update_undo_redo_buttons()
         self.auto_save_loop()
+        self.bot_status_loop()
         self.reload_ui_from_config()
 
     def make_smart_textbox(self, textbox):
@@ -373,6 +372,30 @@ class App(ctk.CTk):
             self.last_file_mtime = os.path.getmtime(CONFIG_FILE) if os.path.exists(CONFIG_FILE) else 0
 
         self.after(5000, self.auto_save_loop)
+
+    def bot_status_loop(self):
+        is_running = False
+        for p in psutil.process_iter(['name', 'cmdline']):
+            try:
+                if p.info['cmdline'] and any('bot.py' in arg for arg in p.info['cmdline']):
+                    name = p.info['name'].lower()
+                    if 'python' in name or 'py.exe' in name or 'py' in name:
+                        is_running = True
+                        break
+            except: pass
+
+        if hasattr(self, 'btn_start_bot'):
+            if is_running:
+                self.btn_start_bot.configure(text='BOT IS RUNNING (TERMINAL OPEN)', fg_color='#2FA572', hover_color='#1E7A52')
+                self._was_running = True
+            else:
+                self.btn_start_bot.configure(text='START BOT')
+                # If it just stopped running, reset the color back to whatever theme you have selected
+                if getattr(self, '_was_running', False):
+                    self._was_running = False
+                    self.apply_color_profile(self.config_data.get('color_profile', 'Standard'))
+
+        self.after(2000, self.bot_status_loop)
 
     def save_all_silent(self):
         try:
@@ -594,59 +617,6 @@ class App(ctk.CTk):
 
         show_popup('Key Verification', msg)
 
-    def force_load_env(self):
-        fallback_file = os.path.join(SCRIPT_DIR, 'env')
-        target_file = ENV_FILE
-        
-        def parse_file(filepath):
-            parsed = {'DISCORD_TOKEN': '', 'GOOGLE_API_KEYS': '', 'HF_TOKEN': ''}
-            if os.path.exists(filepath):
-                with open(filepath, 'r') as f:
-                    for line in f:
-                        if '=' in line:
-                            k, v = line.split('=', 1)
-                            k = k.strip()
-                            v = v.strip().strip("'").strip('"')
-                            if k in parsed: parsed[k] = v
-            return parsed
-
-        new_keys = parse_file(fallback_file)
-        
-        d_token = new_keys.get('DISCORD_TOKEN', '')
-        g_key = new_keys.get('GOOGLE_API_KEYS', '')
-        h_token = new_keys.get('HF_TOKEN', '')
-        
-        if not (d_token or g_key or h_token):
-            new_keys = parse_file(target_file)
-            d_token = new_keys.get('DISCORD_TOKEN', '')
-            g_key = new_keys.get('GOOGLE_API_KEYS', '')
-            h_token = new_keys.get('HF_TOKEN', '')
-            used_fallback = False
-        else:
-            used_fallback = True
-            
-        self.entry_discord.delete(0, 'end')
-        self.entry_discord.insert(0, d_token)
-        
-        self.entry_google.delete(0, 'end')
-        self.entry_google.insert(0, g_key)
-        
-        self.entry_hf.delete(0, 'end')
-        self.entry_hf.insert(0, h_token)
-        
-        self.save_all_silent()
-        
-        if used_fallback and (d_token or g_key or h_token):
-            try:
-                os.remove(fallback_file)
-                show_popup('Success', 'Keys successfully pulled from your "env" file and saved to ".env"! Old file deleted.')
-            except Exception:
-                pass
-        elif os.path.exists(fallback_file):
-            show_popup('Warning', 'Found the "env" file, but no valid keys were inside. It was NOT deleted. Ensure it is formatted like: DISCORD_TOKEN=your_token_here')
-        else:
-            show_popup('Notice', 'No fallback "env" file found. Loaded standard keys.')
-
     def refresh_server_list(self):
         if hasattr(self, '_srv_refresh_job') and self._srv_refresh_job:
             self.after_cancel(self._srv_refresh_job)
@@ -783,9 +753,6 @@ class App(ctk.CTk):
         verify_btn.pack(side='left', padx=5)
         self.start_btns.append(verify_btn)
         
-        force_env_btn = ctk.CTkButton(btn_frame_keys, text='Force Load .env', font=BOLD_FONT, command=self.force_load_env)
-        force_env_btn.pack(side='left', padx=5)
-        self.save_btns.append(force_env_btn)
 
         key_frame = ctk.CTkFrame(scroll, fg_color=BG_FRAME)
         key_frame.pack(fill='x', padx=20, pady=5)
@@ -1656,9 +1623,9 @@ CREDITS & LICENSING:
         copy_lbl = ctk.CTkLabel(ctrl_frame, text='Copyright (c) 2026 JackBJ | Licensed under GPL-3.0', font=INFO_FONT, text_color=('gray40', 'gray75'), fg_color=BG_WINDOW)
         copy_lbl.pack(pady=(0, 2))
 
-        btn = ctk.CTkButton(ctrl_frame, text='START BOT', height=50, font=('League Spartan', 18, 'bold'), command=lambda: run_script('bot.py'))
-        btn.pack(fill='x', pady=(0, 5))
-        self.start_btns.append(btn)
+        self.btn_start_bot = ctk.CTkButton(ctrl_frame, text='START BOT', height=50, font=('League Spartan', 18, 'bold'), command=lambda: run_script('bot.py'))
+        self.btn_start_bot.pack(fill='x', pady=(0, 5))
+        self.start_btns.append(self.btn_start_bot)
         
     def manual_save_btn(self):
         self.save_all_silent()
