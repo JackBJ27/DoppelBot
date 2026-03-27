@@ -28,6 +28,8 @@ import scipy.io.wavfile
 import io
 import keyring
 
+API_SESSION = requests.Session()
+
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 DISCORD_TOKEN = keyring.get_password("DoppelBot", "DISCORD_TOKEN")
@@ -178,7 +180,7 @@ def find_working_model():
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={current_key}"
         try:
             dprint("brain", f"Testing {model}...")
-            response = requests.post(url, json=test_payload, headers=headers)
+            response = API_SESSION.post(url, json=test_payload, headers=headers)
             if response.status_code == 200:
                 ACTIVE_MODEL = model
                 dprint("brain", f"   -> Success! Using {model}")
@@ -217,7 +219,7 @@ async def check_and_update_stats(user_name, text):
                             url = f"https://generativelanguage.googleapis.com/v1beta/models/{ACTIVE_MODEL}:generateContent?key={current_key}"
                             prompt = f"Does this message logically and contextually relate to the topic of '{stat['stat_name']}'? Message: '{text}'. Answer ONLY 'yes' or 'no'."
                             payload = {"contents": [{"parts": [{"text": prompt}]}]}
-                            res = requests.post(url, json=payload, timeout=5)
+                            res = API_SESSION.post(url, json=payload, timeout=5)
                             if res.status_code == 200:
                                 reply = res.json()['candidates'][0]['content']['parts'][0]['text'].strip().lower()
                                 if 'no' in reply and 'yes' not in reply:
@@ -392,7 +394,7 @@ def get_ai_reply(current_user, conversation_history, random_memories, soul_text,
         }
 
         try:
-            response = requests.post(url, json=payload, timeout=60)
+            response = API_SESSION.post(url, json=payload, timeout=60)
             if response.status_code == 200:
                 data = response.json()
                 if 'candidates' in data and data['candidates']:
