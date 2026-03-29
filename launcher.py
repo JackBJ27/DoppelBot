@@ -85,6 +85,7 @@ def load_config():
         'enable_voice': True,
         'allow_dm_voice': True,
         'enable_thinking_music': False,
+        'dynamic_emotions': False,
         'enable_stats': True,
         'auto_chat': True,
         'auto_join_vc': True,
@@ -109,6 +110,7 @@ def load_config():
         'msg_join_vc': "hey, what's up?",
         'msg_stop_talking': 'my bad. zipping it.',
         'msg_vocal_cords_ready': "my vocal cords are finally warmed up. what's up?",
+        'msg_leave_vc': 'aw man, really? you want me to leave? fine. i didnt want to be here anyways.',
         'debug_modules': {'voice': True, 'tts': True, 'brain': True, 'stats': True, 'auto_chat': True, 'events': True},
         'voice_corrections': {"gonna": "going to", "wanna": "want to"},
         'tts_pronunciations': {r"\blmao\b": "el em ay oh"},
@@ -162,7 +164,8 @@ def load_config():
                 'msg_brain_disconnected': user_config.get('msg_brain_disconnected', 'brain disconnected.'),
                 'msg_join_vc': user_config.get('msg_join_vc', "hey, what's up?"),
                 'msg_stop_talking': user_config.get('msg_stop_talking', 'my bad. zipping it.'),
-                'msg_vocal_cords_ready': user_config.get('msg_vocal_cords_ready', "my vocal cords are finally warmed up. what's up?")
+                'msg_vocal_cords_ready': user_config.get('msg_vocal_cords_ready', "my vocal cords are finally warmed up. what's up?"),
+                'msg_leave_vc': user_config.get('msg_leave_vc', 'aw man, really? you want me to leave? fine. i didnt want to be here anyways.')
             }
         }
         user_config['active_profile'] = 'Default'
@@ -283,6 +286,7 @@ class App(ctk.CTk):
         self.auto_save_loop()
         self.bot_status_loop()
         self.reload_ui_from_config()
+        self.after(3000, self.check_for_updates)
 
     def make_smart_textbox(self, textbox):
         self.smart_textboxes.append(textbox)
@@ -419,6 +423,7 @@ class App(ctk.CTk):
             self.config_data['profiles'][active_prof]['msg_join_vc'] = self.entry_msg_join.get().strip()
             self.config_data['profiles'][active_prof]['msg_stop_talking'] = self.entry_msg_stop.get().strip()
             self.config_data['profiles'][active_prof]['msg_vocal_cords_ready'] = self.entry_msg_vocal_ready.get().strip()
+            self.config_data['profiles'][active_prof]['msg_leave_vc'] = self.entry_msg_leave_vc.get().strip()
             
             self.config_data['bot_name'] = self.entry_name.get()
             self.config_data['base_prompt'] = self.text_base.get('1.0', 'end-1c')
@@ -433,6 +438,7 @@ class App(ctk.CTk):
             self.config_data['msg_join_vc'] = self.entry_msg_join.get().strip()
             self.config_data['msg_stop_talking'] = self.entry_msg_stop.get().strip()
             self.config_data['msg_vocal_cords_ready'] = self.entry_msg_vocal_ready.get().strip()
+            self.config_data['msg_leave_vc'] = self.entry_msg_leave_vc.get().strip()
             
             active_mods = []
             for m, var in self.model_vars.items():
@@ -480,6 +486,7 @@ class App(ctk.CTk):
             self.config_data['auto_join_vc'] = self.var_autojoin.get()
             self.config_data['allow_dm_voice'] = self.var_dm_voice.get()
             self.config_data['enable_thinking_music'] = self.var_thinking_music.get()
+            self.config_data['dynamic_emotions'] = self.var_dyn_emotions.get()
             self.config_data['enabled_emotions'] = {emo: var.get() for emo, var in self.emo_vars.items()}
             self.config_data['debug_modules'] = {mod: var.get() for mod, var in self.debug_vars.items()}
             
@@ -1005,6 +1012,7 @@ class App(ctk.CTk):
         create_response_entry(scroll, 'Voice Channel Join Greeting:', 'entry_msg_join')
         create_response_entry(scroll, 'Stop/Shush Command Acknowledged:', 'entry_msg_stop')
         create_response_entry(scroll, 'Vocal Cords Warmed Up Greeting:', 'entry_msg_vocal_ready')
+        create_response_entry(scroll, 'Disconnect/Leave VC Command Acknowledged:', 'entry_msg_leave_vc')
 
         ctk.CTkLabel(scroll, text='Server Emoji Syncer & Picker', font=TITLE_FONT, fg_color=BG_SCROLL).pack(anchor='w', padx=20, pady=(25,0))
         ctk.CTkLabel(scroll, text='Uncheck emojis to stop the bot from using them. Click the Star (★) to make it a favorite!', font=INFO_FONT, text_color=('gray20', 'gray75'), fg_color=BG_SCROLL).pack(anchor='w', padx=20)
@@ -1180,6 +1188,7 @@ class App(ctk.CTk):
         self.var_autojoin = ctk.BooleanVar()
         self.var_dm_voice = ctk.BooleanVar()
         self.var_thinking_music = ctk.BooleanVar()
+        self.var_dyn_emotions = ctk.BooleanVar()
         
         vf = ctk.CTkFrame(scroll, fg_color=BG_SCROLL)
         vf.pack()
@@ -1196,6 +1205,10 @@ class App(ctk.CTk):
         tm_sw = ctk.CTkSwitch(scroll, text='Play Thinking Music (Plays thinking.wav from voice_references folder)', variable=self.var_thinking_music, font=APP_FONT, bg_color=BG_SCROLL, fg_color=UNSELECTED_TRACK)
         tm_sw.pack(pady=(0, 15))
         self.switches.append(tm_sw)
+        
+        dyn_sw = ctk.CTkSwitch(scroll, text='Change emotions mid-sentence (Dynamic Emotions)', variable=self.var_dyn_emotions, font=APP_FONT, bg_color=BG_SCROLL, fg_color=UNSELECTED_TRACK)
+        dyn_sw.pack(pady=(0, 15))
+        self.switches.append(dyn_sw)
 
         ctk.CTkLabel(scroll, text='Allowed Voice Emotions', font=TITLE_FONT, fg_color=BG_SCROLL).pack(pady=(30, 5))
         ctk.CTkLabel(scroll, text='Uncheck emotions if you did not record a .wav file for them, otherwise the bot will crash.', font=INFO_FONT, text_color=('gray20', 'gray75'), fg_color=BG_SCROLL).pack(pady=(0, 10))
@@ -1298,7 +1311,7 @@ class App(ctk.CTk):
         ctk.CTkLabel(scroll, text=' - ' * 20, text_color=('gray20', 'gray75'), fg_color=BG_SCROLL).pack(pady=20)
 
         ctk.CTkLabel(scroll, text='Cloud Updater', font=TITLE_FONT, fg_color=BG_SCROLL).pack(pady=(10, 0))
-        ctk.CTkLabel(scroll, text='Pull the latest bot.py and launcher.py straight from GitHub.\nBecause all your data is safely tucked away in config.json, updating will NOT delete your settings!', font=INFO_FONT, text_color=('gray20', 'gray75'), fg_color=BG_SCROLL).pack(pady=(0, 15))
+        ctk.CTkLabel(scroll, text='Pull the complete DoppelBot repository straight from GitHub (updates all core scripts, bots, and UI).\nBecause all your data is safely tucked away in config.json, updating will NOT delete your settings!', font=INFO_FONT, text_color=('gray20', 'gray75'), fg_color=BG_SCROLL).pack(pady=(0, 15))
 
         upd_frame = ctk.CTkFrame(scroll, fg_color=BG_FRAME)
         upd_frame.pack(fill='x', padx=20, pady=5)
@@ -1345,6 +1358,49 @@ class App(ctk.CTk):
         self.make_smart_textbox(self.advanced_text)
         self.advanced_text.pack(pady=10, fill='both', expand=True, padx=10)
 
+def check_for_updates(self):
+        repo_path = self.config_data.get('github_repo_url', 'JackBJ27/DoppelBot').strip().strip('/')
+        if not repo_path or '/' not in repo_path: return
+            
+        try:
+            latest = requests.get(f'https://api.github.com/repos/{repo_path}/commits/main', timeout=5).json()
+            latest_sha = latest['sha'][:7]
+            commit_msg = latest['commit']['message'].split('\n')[0]
+            
+            saved_sha = self.config_data.get('last_commit_hash', '')
+            
+            if latest_sha != saved_sha and saved_sha != '':
+                self.prompt_update(repo_path, latest_sha, commit_msg)
+            elif saved_sha == '':
+                # First time running this feature, save it silently so it doesn't nag immediately
+                self.config_data['last_commit_hash'] = latest_sha
+                save_config(self.config_data)
+        except: pass
+
+    def prompt_update(self, repo_path, latest_sha, commit_msg):
+        popup = ctk.CTkToplevel(self)
+        popup.title('Update Available!')
+        popup.geometry('500x250')
+        popup.attributes('-topmost', True)
+        popup.grab_set()
+        
+        msg = f"A new DoppelBot update was found on GitHub!\n\nLatest Commit: {commit_msg}\n\nWould you like to download and install this update now?"
+        lbl = ctk.CTkLabel(popup, text=msg, font=APP_FONT, wraplength=450, fg_color=BG_WINDOW)
+        lbl.pack(pady=20, padx=20)
+        
+        btn_frame = ctk.CTkFrame(popup, fg_color=BG_WINDOW)
+        btn_frame.pack(pady=10)
+        
+        def do_update():
+            popup.destroy()
+            self.perform_github_update(repo_path, latest_sha)
+            
+        btn_yes = ctk.CTkButton(btn_frame, text='Yes, Update Now', font=BOLD_FONT, fg_color='#2FA572', hover_color='#1E7A52', command=do_update)
+        btn_yes.pack(side='left', padx=10)
+        
+        btn_no = ctk.CTkButton(btn_frame, text='Not Right Now', font=BOLD_FONT, fg_color='#C0392B', hover_color='#922B21', command=popup.destroy)
+        btn_no.pack(side='left', padx=10)
+
     def fetch_versions(self):
         repo_path = self.entry_repo.get().strip().strip('/')
         if not repo_path or '/' not in repo_path:
@@ -1352,20 +1408,22 @@ class App(ctk.CTk):
             return
             
         try:
-            tags = requests.get(f'https://api.github.com/repos/{repo_path}/tags', timeout=5).json()
-            branches = requests.get(f'https://api.github.com/repos/{repo_path}/branches', timeout=5).json()
-            
+            commits = requests.get(f'https://api.github.com/repos/{repo_path}/commits', timeout=5).json()
             versions = []
-            if isinstance(tags, list): versions.extend([t['name'] for t in tags])
-            if isinstance(branches, list): versions.extend([b['name'] for b in branches])
+            
+            if isinstance(commits, list):
+                for c in commits[:15]: # Get last 15 commits to keep the menu clean
+                    sha = c['sha'][:7]
+                    msg = c['commit']['message'].split('\n')[0][:40] 
+                    versions.append(f"{sha} - {msg}")
             
             if not versions: versions = ['main']
             
             self.version_menu.configure(values=versions)
             self.version_menu.set(versions[0])
-            show_popup('Success', f'Found {len(versions)} versions in {repo_path}!')
+            show_popup('Success', f'Found {len(versions)} recent commits in {repo_path}!')
         except:
-            show_popup('Error', 'Failed to fetch versions. Check repo name or rate limits.')
+            show_popup('Error', 'Failed to fetch commits. Check repo name or rate limits.')
             self.version_menu.configure(values=['main'])
             self.version_menu.set('main')
 
@@ -1375,24 +1433,34 @@ class App(ctk.CTk):
             show_popup('Error', 'Please enter your GitHub repo format as Username/Repository.\nExample: JackBJ27/DoppelBot')
             return
             
-        version = self.version_menu.get()
+        raw_version = self.version_menu.get()
+        version = raw_version.split(' - ')[0] if ' - ' in raw_version else raw_version
+        
+        self.perform_github_update(repo_path, version)
+
+    def perform_github_update(self, repo_path, version):
         self.config_data['github_repo_url'] = repo_path
         save_config(self.config_data)
         
-        base_url = f'https://raw.githubusercontent.com/{repo_path}/{version}'
+        zip_url = f'https://api.github.com/repos/{repo_path}/zipball/{version}'
         
         try:
-            r_bot = requests.get(f'{base_url}/bot.py')
-            r_launch = requests.get(f'{base_url}/launcher.py')
-            
-            if r_bot.status_code == 200 and r_launch.status_code == 200:
-                with open(os.path.join(SCRIPT_DIR, 'bot.py'), 'w', encoding='utf-8') as f:
-                    f.write(r_bot.text)
-                with open(os.path.join(SCRIPT_DIR, 'launcher.py'), 'w', encoding='utf-8') as f:
-                    f.write(r_launch.text)
-                show_popup('Success', f'Files updated to version "{version}"! Please close and re-open the dashboard to see any launcher changes.')
+            r = requests.get(zip_url, stream=True)
+            if r.status_code == 200:
+                temp_zip = os.path.join(SCRIPT_DIR, 'temp_update.zip')
+                with open(temp_zip, 'wb') as f:
+                    for chunk in r.iter_content(chunk_size=8192):
+                        f.write(chunk)
+                        
+                self._extract_update_zip(temp_zip)
+                os.remove(temp_zip)
+                
+                self.config_data['last_commit_hash'] = version
+                save_config(self.config_data)
+                
+                show_popup('Success', f'All files updated to version "{version}"! Please close and re-open the dashboard.')
             else:
-                show_popup('Error', f'Could not fetch files. Check the spelling of your username/repo.\nbot.py: {r_bot.status_code}\nlauncher.py: {r_launch.status_code}')
+                show_popup('Error', f'Could not fetch repository. Status code: {r.status_code}')
         except Exception as e:
             show_popup('Error', f'Something crashed:\n{e}')
 
@@ -1401,20 +1469,39 @@ class App(ctk.CTk):
         if not zip_path: return
         
         try:
-            with zipfile.ZipFile(zip_path, 'r') as z:
-                bot_file = next((f for f in z.namelist() if f.endswith('bot.py')), None)
-                launcher_file = next((f for f in z.namelist() if f.endswith('launcher.py')), None)
-                
-                if bot_file and launcher_file:
-                    with open(os.path.join(SCRIPT_DIR, 'bot.py'), 'wb') as f:
-                        f.write(z.read(bot_file))
-                    with open(os.path.join(SCRIPT_DIR, 'launcher.py'), 'wb') as f:
-                        f.write(z.read(launcher_file))
-                    show_popup('Success', 'Updated from ZIP successfully! Please restart the dashboard.')
-                else:
-                    show_popup('Error', 'Could not find bot.py or launcher.py inside the ZIP.')
+            self._extract_update_zip(zip_path)
+            show_popup('Success', 'Updated all files from ZIP successfully! Please restart the dashboard.')
         except Exception as e:
             show_popup('Error', f'Failed to extract ZIP:\n{e}')
+
+    def _extract_update_zip(self, zip_path):
+        safe_files = ['config.json', '.env', 'bot_brain.txt', 'soul.txt', 'vc_history.txt', 'bot_servers.json', 'stats.json', 'fetched_emojis.json']
+        
+        with zipfile.ZipFile(zip_path, 'r') as z:
+            top_level_items = set(item.split('/')[0] for item in z.namelist() if item)
+            has_root_dir = len(top_level_items) == 1 and next(iter(top_level_items)) + '/' in z.namelist()
+            root_dir = next(iter(top_level_items)) + '/' if has_root_dir else ""
+
+            for file_info in z.infolist():
+                if file_info.is_dir(): continue
+                
+                target_path = file_info.filename
+                if has_root_dir and target_path.startswith(root_dir):
+                    target_path = target_path[len(root_dir):]
+                    
+                if not target_path: continue 
+                
+                filename = os.path.basename(target_path)
+                if filename in safe_files: continue
+                    
+                if 'voice_references' in target_path and target_path.endswith('.wav'): continue
+                if 'emoji_cache' in target_path: continue
+
+                abs_target = os.path.join(SCRIPT_DIR, target_path)
+                os.makedirs(os.path.dirname(abs_target), exist_ok=True)
+                
+                with z.open(file_info) as source, open(abs_target, 'wb') as target:
+                    target.write(source.read())
 
     def build_howto_tab(self):
         guide = """WELCOME TO THE DOPPELBOT GUIDE
@@ -1443,7 +1530,7 @@ class App(ctk.CTk):
    - If this is your first time using the bot, click the 'Show Initial Data Mining Tools' button at the bottom.
    - Run step 1, wait for it to finish. This will take a little bit if you have many messages. Please be patient and do NOT close the terminal. It will alert you when it's done. Next, run step 2 and wait for it to finish. This will also take a few minutes - do NOT close the terminal. It will alert you when completed.
    - Ensure you actually recorded all voice emotion .wav files, or uncheck the ones you skipped.
-   - NOTE: You can optionally add files named "warming_up.wav", "wait.wav", "still_loading.wav", and "almost_there.wav" to your script folder. The bot will automatically play these to stall for time while the AI voice module boots up in the background!
+   - NOTE: You can optionally add files named "warming_up.wav", "wait.wav", "still_loading.wav", and "almost_there.wav" to your voice_references folder. The bot will play these to stall for time while the AI boots up! You can ALSO add "uhhh.wav", "um.wav", "hmmm.wav", "sigh.wav", "big_sigh.wav", and "chatter.wav" to make the bot naturally stutter and sigh when the AI is thinking mid-sentence!
 
 5. Stats Tab:
    - Want the bot to publicly shame your friend every time they complain about lag? Or when they send something sus in chat? Set a stat for it here.
@@ -1699,6 +1786,7 @@ CREDITS & LICENSING:
         self.entry_msg_join.delete(0, 'end'); self.entry_msg_join.insert(0, prof_data.get('msg_join_vc', self.config_data.get('msg_join_vc', "uh suh dudes, what's up?")))
         self.entry_msg_stop.delete(0, 'end'); self.entry_msg_stop.insert(0, prof_data.get('msg_stop_talking', self.config_data.get('msg_stop_talking', 'my bad. zipping it.')))
         self.entry_msg_vocal_ready.delete(0, 'end'); self.entry_msg_vocal_ready.insert(0, prof_data.get('msg_vocal_cords_ready', self.config_data.get('msg_vocal_cords_ready', "my vocal cords are finally warmed up. what's up?")))
+        self.entry_msg_leave_vc.delete(0, 'end'); self.entry_msg_leave_vc.insert(0, prof_data.get('msg_leave_vc', self.config_data.get('msg_leave_vc', 'aw man, really? you want me to leave? fine.')))
 
         self.var_lowercase.set(self.config_data.get('force_lowercase', True))
         self.entry_banned.delete(0, 'end'); self.entry_banned.insert(0, ', '.join(self.config_data.get('banned_inputs', ['n-word', 'slur'])))
@@ -1709,6 +1797,9 @@ CREDITS & LICENSING:
         self.var_autojoin.set(self.config_data.get('auto_join_vc', True))
         self.var_dm_voice.set(self.config_data.get('allow_dm_voice', True))
         self.var_thinking_music.set(self.config_data.get('enable_thinking_music', False))
+        
+        if hasattr(self, 'var_dyn_emotions'):
+            self.var_dyn_emotions.set(self.config_data.get('dynamic_emotions', False))
         
         enabled_emos = self.config_data.get('enabled_emotions', {})
         for emo, var in self.emo_vars.items():
