@@ -197,7 +197,7 @@ Drag your **messages** folder from earlier directly into the bot folder.
 
  Drag your **7 voice references** into the **voice_references** folder.
 
- **Note**: If you would like the bot to say phrases while it loads up, you may put files named `warming_up.wav`, `wait.wav`, `still_loading.wav`, and `almost_done.wav`, and it will rotate through those voice clips while the models start up. Just keep in mind it still must be *Mono* at *16000 Hz*.
+ **Note**: If you would like the bot to say phrases while it loads up, you may put files named `warming_up.wav`, `wait.wav`, `still_loading.wav`, and `almost_done.wav` into your `voice_references` folder, and it will rotate through those voice clips while the models start up. You can ALSO add `uhhh.wav`, `um.wav`, `hmmm.wav`, `sigh.wav`, `big_sigh.wav`, and `chatter.wav` to make the bot naturally stutter and sigh when the AI is thinking mid-sentence! Just keep in mind they all still must be *Mono* at *16000 Hz*.
 ## The GUI Dashboard
 
 You're almost there! Launch your dashboard by clicking the **start_dashboard** file.
