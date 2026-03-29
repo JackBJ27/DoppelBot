@@ -13,6 +13,8 @@ import json
 from datetime import datetime, timezone
 import logging
 from dotenv import load_dotenv
+import torch
+torch.set_num_threads(4)
 
 
 logging.getLogger('discord.voice_client').setLevel(logging.CRITICAL)
@@ -26,7 +28,9 @@ from ddgs import DDGS
 import scipy.io.wavfile
 
 import io
+import queue
 import keyring
+from collections import deque
 
 API_SESSION = requests.Session()
 
@@ -151,7 +155,7 @@ def can_user_interact(member_or_user):
     return False
 
 def start_thinking_music(vc):
-    if not ENABLE_THINKING_MUSIC or not vc or vc.is_playing(): return
+    if not config.get("enable_thinking_music", False) or not vc or vc.is_playing(): return
     music_file = os.path.join(VOICE_DIR, "thinking.wav")
     if os.path.exists(music_file):
         try:
@@ -356,6 +360,9 @@ def get_ai_reply(current_user, conversation_history, random_memories, soul_text,
         current_key = GOOGLE_API_KEYS[CURRENT_KEY_INDEX]
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{ACTIVE_MODEL}:generateContent?key={current_key}"
         
+        valid_tags = "[default], [sad], [anger], [dead inside], [excited], [anxious], [bored]"
+        dyn_rule = f"\n7. DYNAMIC EMOTIONS (CRITICAL): You MUST change tone when the topic shifts. You are STRICTLY LIMITED to ONLY these exact tags: {valid_tags}. Place tags at the START of a sentence or mid-sentence. NEVER put a tag at the very end of a message or right before punctuation. You MUST write actual words after every tag." if config.get("dynamic_emotions", False) else ""
+        
         full_prompt = f"""
         {BASE_PROMPT} It is currently {current_time_str}.
         {web_context}
@@ -377,7 +384,7 @@ def get_ai_reply(current_user, conversation_history, random_memories, soul_text,
         {retry_note}
         
         *** CRITICAL RULES ***
-        {RULES}
+        {RULES}{dyn_rule}
         
         REPLY:
         """
@@ -442,6 +449,165 @@ def get_ai_reply(current_user, conversation_history, random_memories, soul_text,
 
     return MSG_SAFETY_FILTER, "default"
 
+def get_ai_reply_stream(user_name, history_text, memories, soul_text, target_msg, mode, text_queue, web_context=""):
+    global ACTIVE_MODEL, CURRENT_KEY_INDEX
+    if not ACTIVE_MODEL:
+        find_working_model()
+        if not ACTIVE_MODEL: 
+            text_queue.put(None)
+            return MSG_BRAIN_DISCONNECTED, "default"
+
+    dprint("brain", f"   [STEP 1] Generating LIVE with {ACTIVE_MODEL} (Mode: {mode})...")
+
+    if BANNED_INPUTS:
+        if any(w.lower() in target_msg.lower() for w in BANNED_INPUTS): 
+            text_queue.put(None)
+            return MSG_BANNED_INPUT, "default"
+
+    msg_lower = target_msg.lower().strip()
+    status_triggers = ["doing", "wyd", "what's up", "whats up", "how are"]
+    health_triggers = ["you good", "you fixed", "working", "lobotomy"]
+    
+    special_instruction = ""
+    if any(x in msg_lower for x in health_triggers): special_instruction = "*** PRIORITY: HEALTH CHECK. Say 'Yeah I'm good' or 'Fixed'. ***\n"
+    elif any(x in msg_lower for x in status_triggers): special_instruction = "*** PRIORITY: STATUS. Answer with VAGUE activity. ***\n"
+
+    if mode == "auto_thought": action_target = "*** AUTO-CHAT: Post a brief, casual observation. ***"
+    elif mode.startswith("auto_ping:"):
+        parts = mode.split(":")
+        action_target = f"*** AUTO-CHAT: Randomly start a conversation with {parts[1]}. ACTION: {parts[2]}. DO NOT ping them yourself! ***"
+    else: action_target = f"*** TARGET MESSAGE (REPLY TO THIS) ***\n{user_name}: \"{target_msg}\""
+
+    try:
+        emoji_toggles = config.get("emoji_toggles", {})
+        fav_emojis_ids = config.get("favorite_emojis", [])
+        fav_list = []
+        other_list = []
+        
+        for server_name, emojis in GLOBAL_EMOJI_CACHE.items():
+            for k, e in emojis.items():
+                if emoji_toggles.get(k, True):
+                    formatted = f":{e['name']}:"
+                    if k in fav_emojis_ids: fav_list.append(formatted)
+                    else: other_list.append(formatted)
+                        
+        emoji_prompt = ""
+        if fav_list: emoji_prompt += f"\n*** HIGHLY PREFERRED EMOJIS (USE THESE OFTEN) ***\n{', '.join(fav_list)}\n"
+        if other_list: emoji_prompt += f"\n*** OTHER AVAILABLE EMOJIS ***\n{', '.join(other_list)}\n"
+    except:
+        emoji_prompt = ""
+
+    retry_note = "" 
+    current_time_str = datetime.now().strftime("%A, %B %d, %Y at %I:%M %p")
+    
+    for attempt in range(3):
+        current_key = GOOGLE_API_KEYS[CURRENT_KEY_INDEX]
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{ACTIVE_MODEL}:streamGenerateContent?alt=sse&key={current_key}"
+        
+        valid_tags = "[default], [sad], [anger], [dead inside], [excited], [anxious], [bored]"
+        dyn_rule = f"\n7. DYNAMIC EMOTIONS (CRITICAL): You MUST change tone when the topic shifts. You are STRICTLY LIMITED to ONLY these exact tags: {valid_tags}. Place tags at the START of a sentence or mid-sentence. NEVER put a tag at the very end of a message or right before punctuation. You MUST write actual words after every tag." if config.get("dynamic_emotions", False) else ""
+        
+        full_prompt = f"""
+        {BASE_PROMPT} It is currently {current_time_str}.
+        {web_context}
+        {emoji_prompt}
+        
+        *** PAST CONTEXT ***
+        {history_text}
+        
+        *** SOUL (BACKGROUND INFO) ***
+        {soul_text}
+        
+        *** STYLE EXAMPLES ***
+        {memories}
+        
+        {special_instruction}{action_target}
+        {retry_note}
+        
+        *** CRITICAL RULES ***
+        {RULES}{dyn_rule}
+        
+        REPLY:
+        """
+
+        payload = {
+            "contents": [{ "parts": [{"text": full_prompt}] }],
+            "safetySettings": [
+                {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+                {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+                {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+                {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"}
+            ],
+            "generationConfig": {"temperature": TEMPERATURE, "topK": 40, "maxOutputTokens": 150}
+        }
+
+        try:
+            response = API_SESSION.post(url, json=payload, stream=True, timeout=60)
+            if response.status_code == 200:
+                response.encoding = 'utf-8'
+                full_response = ""
+                chunk_buffer = ""
+                
+                for line in response.iter_lines(decode_unicode=True):
+                    if line and line.startswith("data: "):
+                        try:
+                            json_data = json.loads(line[6:])
+                            if 'candidates' in json_data and json_data['candidates']:
+                                text_part = json_data['candidates'][0]['content']['parts'][0]['text']
+                                
+                                text_part = text_part.replace('’', "'").replace('‘', "'").replace('“', '"').replace('”', '"')
+                                
+                                full_response += text_part 
+                                chunk_buffer += text_part
+                                
+                                while True:
+                                    m_punct = re.search(r'[\.\!\?]+(\s|$)', chunk_buffer)
+                                    m_tag = re.search(r'\[[a-zA-Z ]+\]', chunk_buffer)
+                                    
+                                    pts = []
+                                    if m_punct:
+                                        pts.append(('punct', m_punct.end()))
+                                    if m_tag:
+                                        if m_tag.start() > 0:
+                                            pts.append(('tag_start', m_tag.start()))
+                                        else:
+                                            pts.append(('tag_end', m_tag.end()))
+
+                                    if not pts:
+                                        break
+
+                                    pts.sort(key=lambda x: x[1])
+                                    split_idx = pts[0][1]
+
+                                    if split_idx > 0:
+                                        text_queue.put(chunk_buffer[:split_idx])
+                                        chunk_buffer = chunk_buffer[split_idx:]
+                                    else:
+                                        break
+                        except Exception: pass
+                            
+                if chunk_buffer.strip():
+                    text_queue.put(chunk_buffer)
+                    
+                text_queue.put(None) 
+                
+                for bad_phrase, good_phrase in WORD_REPLACEMENTS.items():
+                    full_response = re.sub(re.escape(bad_phrase), good_phrase, full_response, flags=re.IGNORECASE)
+                full_response = cleanup_response(full_response.strip())
+                
+                return full_response, "default"
+                
+            elif response.status_code == 429: 
+                switch_api_key(); time.sleep(1)    
+            else: time.sleep(2)
+            
+        except Exception as e:
+            print(f"[STREAMING API ERROR] {e}")
+            time.sleep(2)
+
+    text_queue.put(None)
+    return MSG_SAFETY_FILTER, "default"
+
 async def fetch_emojis():
     await client.wait_until_ready()
     global GLOBAL_EMOJI_CACHE
@@ -477,6 +643,13 @@ async def fetch_emojis():
 tts_model = None
 voice_states = {}
 EMOTION_FILES = {"default": "reference.wav", "sad": "sad_reference.wav", "anger": "anger_reference.wav", "dead inside": "dead_inside_reference.wav", "excited": "excited_reference.wav", "anxious": "anxious_reference.wav", "bored": "bored_reference.wav"}
+
+async def speak_and_leave(vc, text):
+    await generate_and_play_tts(vc, text, "sad")
+    while vc.is_playing():
+        await asyncio.sleep(0.1)
+    if vc.is_connected():
+        await vc.disconnect()
 
 async def load_vocal_cords():
     global tts_model, voice_states, VOCAL_CORDS_READY
@@ -514,41 +687,308 @@ async def play_stalling_audio(vc):
                 index = (index + 1) % len(stall_files)
         await asyncio.sleep(4)
 
-async def generate_and_play_tts(vc_client, text, emotion="default"):
-    global LAST_VC_INTERACTION 
-    
+class LiveAudioHose(discord.AudioSource):
+    def __init__(self):
+        self.queue = deque()
+        self.finished = False
+        self.is_starving = False
+        
+    def read(self):
+        if self.queue:
+            self.is_starving = False
+            return self.queue.popleft()
+        
+        if self.finished:
+            return b''
+        else:
+            self.is_starving = True
+            return b'\x00' * 3840
+            
+    def add_audio(self, pydub_segment):
+        self.is_starving = False
+        seg = pydub_segment.set_frame_rate(48000).set_channels(2).set_sample_width(2)
+        raw = seg.raw_data
+        for i in range(0, len(raw), 3840):
+            frame = raw[i:i+3840]
+            if len(frame) == 3840: self.queue.append(frame)
+            elif len(frame) > 0: self.queue.append(frame + b'\x00' * (3840 - len(frame)))
+            
+    def stop(self):
+        self.finished = True
+
+def cpu_optimized_generate(model, state, text):
+    import torch
+    with torch.no_grad():
+        return model.generate_audio(state, text)
+
+async def generate_and_play_tts(vc_client, text, base_emotion="default"):
+    global LAST_VC_INTERACTION
+    if not vc_client or not vc_client.is_connected() or not tts_model: return
+
+    my_tts_id = time.time()
+    vc_client._current_tts_id = my_tts_id
+
     clean_text = re.sub(r'<a?:[^:]+:\d+>', '', text)
     clean_text = re.sub(r':[a-zA-Z0-9_]+:', '', clean_text)
     clean_text = re.sub(r'http[s]?://\S+', '', clean_text)
     
-    clean_text = fix_pronunciation(clean_text)
-    
-    dprint("tts", f"   -> [TTS DEBUG] Attempting to speak: '{clean_text}' (Emotion: {emotion})")
-    if not vc_client or not vc_client.is_connected() or not tts_model: return
-    
-    current_state = voice_states.get(emotion, voice_states.get("default"))
-    if not current_state: return
-    try:
-        audio = await client.loop.run_in_executor(None, functools.partial(tts_model.generate_audio, current_state, clean_text))
-        audio_file = os.path.join(SCRIPT_DIR, "response.wav")
-        scipy.io.wavfile.write(audio_file, tts_model.sample_rate, audio.numpy())
+    use_dynamic = config.get("dynamic_emotions", False)
+    if not use_dynamic:
+        clean_text = re.sub(r'\[.*?\]', '', clean_text)
         
-        if vc_client.is_playing():
-            if isinstance(vc_client.source, discord.PCMVolumeTransformer):
-                for _ in range(10):
-                    if not vc_client.is_playing(): break
-                    vc_client.source.volume = max(0.0, vc_client.source.volume - 0.05)
-                    await asyncio.sleep(0.1)
-            vc_client.stop()
+    parts = re.split(r'(\[[a-zA-Z ]+\]|[\.\!\?]+)', clean_text)
+    
+    chunks = []
+    current_emo = base_emotion
+    buffer_str = ""
+    
+    for part in parts:
+        if not part.strip(): continue
+        tag_match = re.match(r'^\[(.*?)\]$', part)
+        if tag_match and use_dynamic:
+            new_emo = tag_match.group(1).lower()
+            if new_emo in voice_states:
+                if buffer_str.strip():
+                    chunks.append((buffer_str.strip(), current_emo))
+                    buffer_str = ""
+                current_emo = new_emo
+        elif part in ['.', '!', '?', '...', '..', '!!', '!?']:
+            buffer_str += part
+            if len(buffer_str.strip()) > 35: 
+                chunks.append((buffer_str.strip(), current_emo))
+                buffer_str = ""
+        else:
+            buffer_str += part
             
-        await asyncio.sleep(0.5) 
-        ffmpeg_path = os.path.join(SCRIPT_DIR, 'ffmpeg.exe')
-        vc_client.play(discord.FFmpegPCMAudio(audio_file, executable=ffmpeg_path if os.path.exists(ffmpeg_path) else 'ffmpeg'))
-        LAST_VC_INTERACTION = time.time() 
-    except Exception as e: 
-        print(f"[TTS ERROR] {e}")
-        if vc_client and vc_client.is_playing(): vc_client.stop()
+    if buffer_str.strip(): chunks.append((buffer_str.strip(), current_emo))
+    if not chunks: return
 
+    dprint("tts", f"   -> [TTS DEBUG] Streaming {len(chunks)} chunks. Base Emotion: {base_emotion}")
+    
+    if vc_client.is_playing():
+        if isinstance(vc_client.source, discord.PCMVolumeTransformer):
+            for _ in range(3):
+                if not vc_client.is_playing() or getattr(vc_client, '_current_tts_id', None) != my_tts_id: break
+                vc_client.source.volume = max(0.0, vc_client.source.volume - 0.2)
+                await asyncio.sleep(0.05)
+        vc_client.stop()
+        
+    if getattr(vc_client, '_current_tts_id', None) != my_tts_id: return
+        
+    hose = LiveAudioHose()
+    vc_client.play(hose) 
+    
+    held_back_audio = None
+    previous_emo = None
+    
+    for i, (chunk_text, emo) in enumerate(chunks):
+        if not vc_client.is_connected() or getattr(vc_client, '_current_tts_id', None) != my_tts_id: break
+        
+        chunk_text = fix_pronunciation(chunk_text.strip())
+        if len(chunk_text) < 2: continue
+        
+        state = voice_states.get(emo, voice_states.get("default"))
+        try:
+            audio_tensor = await client.loop.run_in_executor(None, functools.partial(cpu_optimized_generate, tts_model, state, chunk_text))
+            
+            if not vc_client.is_connected() or getattr(vc_client, '_current_tts_id', None) != my_tts_id: break
+                
+            wav_io = io.BytesIO()
+            scipy.io.wavfile.write(wav_io, tts_model.sample_rate, audio_tensor.numpy())
+            wav_io.seek(0)
+            seg = AudioSegment.from_wav(wav_io)
+            
+            next_emo = chunks[i+1][1] if i < len(chunks) - 1 else None
+            
+            if previous_emo and previous_emo != emo:
+                silence = AudioSegment.silent(duration=150)
+                seg = silence + seg
+                if held_back_audio: seg = held_back_audio.append(seg, crossfade=150)
+            elif held_back_audio:
+                seg = held_back_audio + seg
+                
+            if next_emo and next_emo != emo:
+                held_back_audio = seg[-150:]
+                play_chunk = seg[:-150]
+            else:
+                held_back_audio = None
+                play_chunk = seg
+                
+            hose.add_audio(play_chunk)
+            previous_emo = emo
+            LAST_VC_INTERACTION = time.time()
+        except Exception as e:
+            print(f"[TTS ERROR] {e}")
+            
+    hose.stop()
+    
+async def generate_and_play_tts_stream(vc_client, text_queue, base_emotion="default"):
+    global LAST_VC_INTERACTION
+    if not vc_client or not vc_client.is_connected() or not tts_model: return
+
+    my_tts_id = time.time()
+    vc_client._current_tts_id = my_tts_id
+
+    if vc_client.is_playing():
+        if isinstance(vc_client.source, discord.PCMVolumeTransformer):
+            for _ in range(3):
+                if not vc_client.is_playing() or getattr(vc_client, '_current_tts_id', None) != my_tts_id: break
+                vc_client.source.volume = max(0.0, vc_client.source.volume - 0.2)
+                await asyncio.sleep(0.05)
+        vc_client.stop()
+        
+    if getattr(vc_client, '_current_tts_id', None) != my_tts_id: return
+        
+    hose = LiveAudioHose()
+    playback_started = False
+    
+    held_back_audio = None
+    current_emo = base_emotion
+    previous_emo = None
+    use_dynamic = config.get("dynamic_emotions", False)
+    
+    stream_finished = False
+    text_accumulator = ""
+    last_filler_time = 0
+    last_audio_push_time = time.time()  
+    consecutive_fillers = 0
+    
+    while True:
+        time_waiting = time.time() - last_audio_push_time
+        time_since_filler = time.time() - last_filler_time
+        
+        current_cooldown = 2.0 + (consecutive_fillers * 1.5)
+        
+        if time_waiting > 0.8 and time_since_filler > current_cooldown:
+            if not playback_started or hose.is_starving or len(hose.queue) < 15:
+                
+                if consecutive_fillers >= 2:
+                    f_choices = ["big_sigh.wav", "sigh.wav", "chatter.wav"]
+                else:
+                    f_choices = ["hmmm.wav", "um.wav", "uhhh.wav"]
+                    
+                f_file = os.path.join(VOICE_DIR, random.choice(f_choices))
+                if os.path.exists(f_file):
+                    try:
+                        hose.add_audio(AudioSegment.from_wav(f_file))
+                        if not playback_started:
+                            vc_client.play(hose)
+                            playback_started = True
+                        last_filler_time = time.time()
+                        consecutive_fillers += 1 # Bump the multiplier
+                    except: pass
+
+        try:
+            raw_chunk = text_queue.get_nowait()
+        except queue.Empty:
+            if stream_finished:
+                break
+            if not vc_client.is_connected() or getattr(vc_client, '_current_tts_id', None) != my_tts_id:
+                if playback_started: hose.stop()
+                return
+            await asyncio.sleep(0.05)
+            continue
+            
+        if raw_chunk is None:
+            stream_finished = True
+            if text_accumulator.strip():
+                raw_chunk = " "
+            else:
+                break
+        else:
+            text_accumulator += " " + raw_chunk
+
+        has_tag = bool(re.search(r'\[(.*?)\]', text_accumulator))
+        is_final = (raw_chunk == " ")
+        clean_for_check = re.sub(r'\[.*?\]', '', text_accumulator).strip()
+        
+        if len(clean_for_check) < 2 and not is_final:
+            continue
+            
+        process_text = text_accumulator
+        text_accumulator = ""
+        
+        if not vc_client.is_connected() or getattr(vc_client, '_current_tts_id', None) != my_tts_id: break
+
+        process_text = re.sub(r'<[^>]+>', '', process_text)
+        process_text = re.sub(r'[<>]', '', process_text)
+        process_text = re.sub(r'\b\d{17,20}\b', '', process_text)
+        process_text = re.sub(r':[a-zA-Z0-9_]+:', '', process_text)
+        process_text = re.sub(r'http[s]?://\S+', '', process_text)
+
+        tag_match = re.search(r'\[(.*?)\]', process_text)
+        if tag_match and use_dynamic:
+            new_emo = tag_match.group(1).lower()
+            if new_emo in voice_states: current_emo = new_emo
+            process_text = re.sub(r'\[.*?\]', '', process_text)
+        elif not use_dynamic:
+            process_text = re.sub(r'\[.*?\]', '', process_text)
+            
+        clean_chunk = fix_pronunciation(process_text.strip())
+        if len(clean_chunk) < 2: continue
+        
+        state = voice_states.get(current_emo, voice_states.get("default"))
+        
+        try:
+            time_since_filler = time.time() - last_filler_time
+            if playback_started and len(hose.queue) < 40 and time_since_filler > 1.8:
+                f_file = os.path.join(VOICE_DIR, random.choice(["hmmm.wav", "um.wav"]))
+                if os.path.exists(f_file):
+                    try:
+                        hose.add_audio(AudioSegment.from_wav(f_file))
+                        last_filler_time = time.time()
+                    except: pass
+            elif not playback_started and (time.time() - last_audio_push_time) > 0.5 and time_since_filler > 1.8:
+                f_file = os.path.join(VOICE_DIR, random.choice(["hmmm.wav", "um.wav"]))
+                if os.path.exists(f_file):
+                    try:
+                        hose.add_audio(AudioSegment.from_wav(f_file))
+                        vc_client.play(hose)
+                        playback_started = True
+                        last_filler_time = time.time()
+                    except: pass
+
+            audio_tensor = await client.loop.run_in_executor(None, functools.partial(cpu_optimized_generate, tts_model, state, clean_chunk))
+            
+            last_audio_push_time = time.time()
+            consecutive_fillers = 0
+            
+            if not vc_client.is_connected() or getattr(vc_client, '_current_tts_id', None) != my_tts_id: break
+                
+            wav_io = io.BytesIO()
+            scipy.io.wavfile.write(wav_io, tts_model.sample_rate, audio_tensor.numpy())
+            wav_io.seek(0)
+            seg = AudioSegment.from_wav(wav_io)
+            
+            if previous_emo and previous_emo != current_emo:
+                silence = AudioSegment.silent(duration=50)
+                seg = silence + seg
+                if held_back_audio: seg = held_back_audio.append(seg, crossfade=50)
+            elif held_back_audio:
+                seg = held_back_audio.append(seg, crossfade=30)
+                
+            held_back_audio = seg[-50:]
+            play_chunk = seg[:-50]
+                
+            hose.add_audio(play_chunk)
+            
+            if not playback_started:
+                vc_client.play(hose)
+                playback_started = True
+                
+            previous_emo = current_emo
+            LAST_VC_INTERACTION = time.time()
+        except Exception as e:
+            print(f"[TTS STREAM ERROR] {e}")
+
+    if held_back_audio and getattr(vc_client, '_current_tts_id', None) == my_tts_id:
+        hose.add_audio(held_back_audio)
+        
+    if not playback_started and getattr(vc_client, '_current_tts_id', None) == my_tts_id:
+        vc_client.play(hose)
+        
+    hose.stop()
+    
 async def handle_transcription(user_id, text, vc_client, forced_emotion=None):
     global IS_THINKING, LAST_VC_INTERACTION
     
@@ -583,6 +1023,15 @@ async def handle_transcription(user_id, text, vc_client, forced_emotion=None):
             if vc_client.is_playing(): vc_client.stop()
             dprint("voice", "   -> [VOICE DEBUG] Told to shut up. Going to sleep.")
             IS_THINKING = False; LAST_VC_INTERACTION = 0; return
+        
+        if any(w in clean_text for w in ["disconnect", "leave", "get out", "go away"]):
+            if vc_client.is_playing(): vc_client.stop()
+            dprint("voice", "   -> [VOICE DEBUG] Told to disconnect.")
+            IS_THINKING = False; LAST_VC_INTERACTION = 0
+            leave_msg = config.get("msg_leave_vc", "aw man, really? you want me to leave? fine.")
+            client.loop.create_task(speak_and_leave(vc_client, leave_msg))
+            return
+        
         if "reset" in clean_text:
             open(VC_BRAIN_FILE, "w").close()
             dprint("voice", "   -> [VOICE DEBUG] Memory wiped.")
@@ -613,17 +1062,28 @@ async def handle_transcription(user_id, text, vc_client, forced_emotion=None):
                     web_context = await client.loop.run_in_executor(None, get_web_context, final_query)
                     break
 
-        reply, chosen_emotion = await client.loop.run_in_executor(
-            None, functools.partial(get_ai_reply, user_name, vc_history, memories, soul, clean_text, "normal", web_context)
+        final_emotion = forced_emotion if forced_emotion else "default"
+        dprint("voice", f"   [STEP 1] Streaming LIVE with {ACTIVE_MODEL}...")
+        
+        clean_history = "\n".join(vc_history)
+        clean_memories = "\n".join([f"- {m}" for m in memories])
+        
+        live_queue = queue.Queue()
+        
+        brain_task = client.loop.run_in_executor(
+            None, functools.partial(get_ai_reply_stream, user_name, clean_history, clean_memories, soul, clean_text, "normal", live_queue, web_context)
         )
-        final_emotion = forced_emotion if forced_emotion else chosen_emotion
-        dprint("voice", f"   -> [VOICE DEBUG] Thought: '{reply}' with emotion: {final_emotion}")
-        if reply:
-            vc_history.append(f"{BOT_NAME}: {reply}")
+        
+        await generate_and_play_tts_stream(vc_client, live_queue, final_emotion)
+        
+        full_reply, _ = await brain_task
+        
+        if full_reply:
+            dprint("voice", f"   -> [VOICE DEBUG] Full memory saved: '{full_reply}'")
+            vc_history.append(f"{BOT_NAME}: {full_reply}")
             if len(vc_history) > 10: vc_history = vc_history[-10:]
             with open(VC_BRAIN_FILE, "w", encoding="utf-8") as f: f.write("\n".join(vc_history) + "\n")
                 
-        await generate_and_play_tts(vc_client, reply, final_emotion)
         LAST_VC_INTERACTION = time.time() 
     finally: IS_THINKING = False
 
@@ -649,6 +1109,8 @@ async def process_audio_chunk(sink, channel, *args):
         except: continue
         
         r = sr.Recognizer()
+        r.pause_threshold = 0.5
+        r.non_speaking_duration = 0.4
         r.energy_threshold = 50 
         r.dynamic_energy_threshold = False
         
@@ -669,8 +1131,8 @@ async def voice_listening_loop(vc):
             elapsed_time = 0.0
             
             while vc.is_connected() and elapsed_time < 20.0:
-                await asyncio.sleep(0.5)
-                elapsed_time += 0.5
+                await asyncio.sleep(0.2)
+                elapsed_time += 0.2
                 is_talking = False
                 current_sizes = {}
                 for ssrc, audio_file in sink.audio_data.items():
@@ -683,10 +1145,10 @@ async def voice_listening_loop(vc):
                     else: silence_ticks = 0 
                 else: silence_ticks = 0 
                 last_sizes = current_sizes
-                if silence_ticks >= 3: break
+                if silence_ticks >= 4: break 
             if vc.is_connected(): vc.stop_recording() 
-            await asyncio.sleep(1.0) 
-        except: await asyncio.sleep(2)
+            await asyncio.sleep(0.5) 
+        except: await asyncio.sleep(1)
 
 async def auto_chat_loop():
     global LAST_MESSAGE_TIME, AUTO_CHAT_ENABLED
@@ -719,9 +1181,10 @@ async def auto_chat_loop():
                 
                 reply, _ = await client.loop.run_in_executor(None, functools.partial(get_ai_reply, "Nobody", history_log, memories, soul, "", mode))
                 if reply:
-                    dprint("auto_chat", f"   -> [AUTO-CHAT] Spontaneously said: '{reply}'")
-                    if mode.startswith("auto_ping:"): await channel.send(f"<@{target_id}> {reply}")
-                    else: await channel.send(reply)
+                    clean_reply = re.sub(r'\[.*?\]', '', reply).strip()
+                    dprint("auto_chat", f"   -> [AUTO-CHAT] Spontaneously said: '{clean_reply}'")
+                    if mode.startswith("auto_ping:"): await channel.send(f"<@{target_id}> {clean_reply}")
+                    else: await channel.send(clean_reply)
 
 @client.event
 async def on_interaction(interaction):
@@ -840,6 +1303,20 @@ async def on_voice_state_update(member, before, after):
                     await asyncio.sleep(300) 
                     if vc.is_connected() and sum(1 for m in vc.channel.members if not m.bot) == 0: await vc.disconnect()
                 client.loop.create_task(leave_if_lonely())
+    
+    if member.id == client.user.id:
+        if before.channel and not after.channel:
+            dprint("voice", "   -> [VOICE DEBUG] Bot was forcefully disconnected. Wiping audio queue.")
+            global IS_THINKING
+            IS_THINKING = False
+        elif before.channel and after.channel and before.channel.id != after.channel.id:
+            dprint("voice", f"   -> [VOICE DEBUG] Bot was dragged to {after.channel.name}.")
+            if client.voice_clients:
+                moved_vc = client.voice_clients[0]
+                if moved_vc.is_playing():
+                    moved_vc.stop() 
+                if VOCAL_CORDS_READY:
+                    client.loop.create_task(generate_and_play_tts(moved_vc, "woah, did we just teleport?", "anxious"))
 
     if not VC_ENABLED or not AUTO_JOIN_VC or member.bot: return
     if after.channel and not client.voice_clients and after.channel.id in ALLOWED_VC_CHANNELS:
@@ -1068,6 +1545,20 @@ async def on_message(message):
                 await message.channel.send(stat_msg)
             return
             
+        leave_keywords = ["disconnect", "leave", "get out", "go away"]
+        if any(w in clean_content for w in leave_keywords):
+            if client.voice_clients and client.voice_clients[0].is_connected():
+                vc_client = client.voice_clients[0]
+                if vc_client.is_playing():
+                    vc_client.stop()
+                
+                leave_msg = config.get("msg_leave_vc", "aw man, really? you want me to leave? fine.")
+                client.loop.create_task(speak_and_leave(vc_client, leave_msg))
+                await message.channel.send("fine, i'm leaving...")
+            else:
+                await message.channel.send("i'm not even in a vc right now man.")
+            return
+            
     should_reply = False
     is_reply_ref = (message.reference and message.reference.resolved and message.reference.resolved.author == client.user)
     
@@ -1110,7 +1601,9 @@ async def on_message(message):
             reply, _ = await client.loop.run_in_executor(
                 None, functools.partial(get_ai_reply, active_user_name, history_log, memories, soul, target_msg, "normal", web_context)
             )
-        if reply: await message.channel.send(reply)
+        if reply: 
+            display_reply = re.sub(r'\[.*?\]', '', reply).strip()
+            await message.channel.send(display_reply)
 
     found_game = next((word for word in AUTO_REPLIES.keys() if word in content_lower), None)
     if found_game and not should_reply:
