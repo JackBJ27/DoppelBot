@@ -1,18 +1,14 @@
 #!/bin/bash
 
-# Sets the terminal window title
 echo -ne "\033]0;Launching DoppelBot Dashboard...\007"
 
 echo "Checking for missing requirements..."
-python3 -c "import flask, requests" 2>/dev/null
+python3 -c "import flask, requests, discord" 2>/dev/null
 
 if [ $? -ne 0 ]; then
-    echo "First launch detected - this may take around 15-25 minutes!"
+    echo "First launch or missing modules detected - this may take around 15-25 minutes!"
     python3 -m pip install -r requirements.txt
     python3 -m pip install flask requests
-else
-    python3 -m pip install -q -r requirements.txt
-    python3 -m pip install -q flask requests
 fi
 
 clear
@@ -24,10 +20,16 @@ echo "Please select which dashboard you want to launch:"
 echo ""
 echo "[1] Desktop Application (Recommended)"
 echo "[2] Web Dashboard (Browser Alternative)"
+echo "[3] Start Bot Directly + Desktop Dashboard in Background"
 echo ""
-read -p "Enter 1 or 2: " choice
+read -p "Enter 1, 2, or 3: " choice
 
-if [ "$choice" == "2" ]; then
+if [ "$choice" == "3" ]; then
+    echo ""
+    echo "Starting Bot and Desktop Dashboard..."
+    python3 launcher.py &
+    python3 -c "import dotenv" 2>/dev/null || python3 -m pip install -q -r requirements.txt && python3 bot.py
+elif [ "$choice" == "2" ]; then
     echo ""
     echo "Starting Web Dashboard..."
     echo "Please leave this window open. The dashboard will open in your browser shortly."
