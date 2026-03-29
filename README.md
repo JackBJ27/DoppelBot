@@ -1,4 +1,3 @@
-
 # DoppelBot - The Easy-to-Set-Up and Optimized Discord AI Bot that Clones Your Voice!
 
 Have you ever wanted to clone and talk to a doppelgänger of yourself with AI? Now you can through Discord!
@@ -80,52 +79,6 @@ DoppelBot's code included FFmpeg, but this is the easier way to install it, the 
 
 ## RESTART YOUR COMPUTER after installing these required files!
 C++ and FFmpeg require a restart before actually working, so if you try to move on without a restart, it **will not work**!
-## Step 2. Your Personal Data
-
-The bot needs to know how you type and what you sound like to function.
-
-### 1. Your Chat History
-In Discord, go to **User Settings - Privacy & Safety - Request all of my Data**
-This will most likely take a few days for Discord to email your data export to you.
-
-When they do, download the .zip file they email you, extract it, and place the **messages** folder inside DoppelBot's included message folder. You'll be mining your data to create your AI "brain" and "soul" files later from your messages, don't worry about this now.
-
-### 2. Your Voice
-Download a program such as Audacity. Record yourself saying this paragraph with 7 different emotions to your voice.
-
-**Yo, it's (your name here). I am recording this quick audio sample so the bot can clone my voice. Is this going to sound incredibly cursed? Yeah, probably. But I need to speak naturally, ask a question, and use a bunch of different syllables so the AI knows exactly how I talk. Hopefully this is enough data to make it work.**
-
-This paragraph goes through all the syllables the AI will need to clone your voice, and the great part is, is that this is all it requires. A simple 15-20 second voice clip!
-
-By recording this same paragraph in 7 different emotional states, it will bring a bit more life to your bot.
-`normal` `sad` `angry` `dead inside` `excited` `anxious` and `bored`. Name them all `name_reference.wav` except for normal, which you'll just label as `reference.wav`. That will be your baseline voice.
-
-**CRITICAL STEP** - You **MUST** export them as **Mono audio**, with the **Project Rate** (bottom left corner) to **16000 Hz** (16kHz). Discord can't process normal stereo audio files for some reason, so it will just crash outright if you keep them stereo and at the original Project Rate.
-
-
-## Step 2. Your Personal Data
-
-The bot needs to know how you type and what you sound like to function.
-
-### 1. Your Chat History
-In Discord, go to **User Settings - Privacy & Safety - Request all of my Data**
-This will most likely take a few days for Discord to email your data export to you.
-
-When they do, download the .zip file they email you, extract it, and place the **messages** folder inside DoppelBot's included message folder. You'll be mining your data to create your AI "brain" and "soul" files later from your messages, don't worry about this now.
-
-### 2. Your Voice
-Download a program such as Audacity. Record yourself saying this paragraph with 7 different emotions to your voice.
-
-**Yo, it's (your name here). I am recording this quick audio sample so the bot can clone my voice. Is this going to sound incredibly cursed? Yeah, probably. But I need to speak naturally, ask a question, and use a bunch of different syllables so the AI knows exactly how I talk. Hopefully this is enough data to make it work.**
-
-This paragraph goes through all the syllables the AI will need to clone your voice, and the great part is, is that this is all it requires. A simple 15-20 second voice clip!
-
-By recording this same paragraph in 7 different emotional states, it will bring a bit more life to your bot.
-`normal` `sad` `angry` `dead inside` `excited` `anxious` and `bored`. Name them all `name_reference.wav` except for normal, which you'll just label as `reference.wav`. That will be your baseline voice.
-
-**CRITICAL STEP** - You **MUST** export them as **Mono audio**, with the **Project Rate** (bottom left corner) to **16000 Hz** (16kHz). Discord can't process normal stereo audio files for some reason, so it will just crash outright if you keep them stereo and at the original Project Rate.
-
-
 ## Step 2. Your Personal Data
 
 The bot needs to know how you type and what you sound like to function.
