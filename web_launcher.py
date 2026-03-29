@@ -47,7 +47,7 @@ def load_config():
         'emoji_toggles': {}, 'banned_inputs': [], 'removed_words': [], 'enabled_emotions': {}, 'debug_modules': {},
         'word_replacements': {}, 'voice_corrections': {}, 'tts_pronunciations': {}, 'auto_replies': {},
         'vip_map': {}, 'allowed_roles': {}, 'allowed_text_channels': {}, 'allowed_vc_channels': {}, 'enabled_commands': [],
-        'enable_thinking_music': False, 'theme': 'Dark', 'ui_scaling': 1.0, 'accent_color': '#d1d1d1', 'github_repo_url': 'JackBJ27/DoppelBot'
+        'enable_thinking_music': False, 'dynamic_emotions': False, 'theme': 'Dark', 'ui_scaling': 1.0, 'accent_color': '#d1d1d1', 'github_repo_url': 'JackBJ27/DoppelBot'
     }
     config = {}
     if os.path.exists(CONFIG_FILE):
@@ -328,7 +328,7 @@ HTML_TEMPLATE = r"""
                                 <div class="col-6"><label class="ctk-info">AI Brain/Model Unreachable:</label><input type="text" class="ctk-input" v-model="activeProfileData.msg_brain_disconnected"></div>
                                 <div class="col-6"><label class="ctk-info">Voice Channel Join Greeting:</label><input type="text" class="ctk-input" v-model="activeProfileData.msg_join_vc"></div>
                                 <div class="col-6"><label class="ctk-info">Stop/Shush Command Acknowledged:</label><input type="text" class="ctk-input" v-model="activeProfileData.msg_stop_talking"></div>
-                                <div class="col-12"><label class="ctk-info">Vocal Cords Warmed Up Greeting:</label><input type="text" class="ctk-input" v-model="activeProfileData.msg_vocal_cords_ready"></div>
+                                <div class="col-6"><label class="ctk-info">Disconnect/Leave VC Command Acknowledged:</label><input type="text" class="ctk-input" v-model="activeProfileData.msg_leave_vc"></div> <div class="col-6"><label class="ctk-info">Vocal Cords Warmed Up Greeting:</label><input type="text" class="ctk-input" v-model="activeProfileData.msg_vocal_cords_ready"></div>
                             </div>
                         </div>
 
@@ -339,6 +339,7 @@ HTML_TEMPLATE = r"""
                                 <label class="d-flex align-items-center"><label class="switch"><input type="checkbox" v-model="config.auto_join_vc"><span class="slider"></span></label> Auto-Join VC</label>
                                 <label class="d-flex align-items-center"><label class="switch"><input type="checkbox" v-model="config.allow_dm_voice"><span class="slider"></span></label> Allow DM-to-Voice</label>
                                 <label class="d-flex align-items-center"><label class="switch"><input type="checkbox" v-model="config.enable_thinking_music"><span class="slider"></span></label> Thinking Music</label>
+                                <label class="d-flex align-items-center"><label class="switch"><input type="checkbox" v-model="config.dynamic_emotions"><span class="slider"></span></label> Dynamic Emotions</label>
                             </div>
 
                             <div class="ctk-title mt-4">Allowed Voice Emotions</div>
@@ -448,7 +449,7 @@ HTML_TEMPLATE = r"""
                                     <li>If this is your first time using the bot, click the <strong>'Show Initial Data Mining Tools'</strong> button at the bottom of the General tab.</li>
                                     <li>Run step 1, wait for it to finish. This will take a little bit. Next, run step 2 and wait for it to finish.</li>
                                     <li>Ensure you actually recorded all voice emotion <code>.wav</code> files, or uncheck the ones you skipped.</li>
-                                    <li><strong>NOTE:</strong> You can optionally add files named <code>warming_up.wav</code>, <code>wait.wav</code>, <code>still_loading.wav</code>, and <code>almost_there.wav</code> to your script folder. The bot will play these to stall for time while the AI voice boots up!</li>
+                                    <li><strong>NOTE:</strong> You can optionally add files named <code>warming_up.wav</code>, <code>wait.wav</code>, <code>still_loading.wav</code>, and <code>almost_there.wav</code> to your voice_references folder to stall while the AI boots up. You can ALSO add <code>uhhh.wav</code>, <code>um.wav</code>, <code>hmmm.wav</code>, <code>sigh.wav</code>, <code>big_sigh.wav</code>, and <code>chatter.wav</code> to make the bot naturally stutter and sigh when the AI is thinking mid-sentence!</li>
                                 </ul>
 
                                 <h5 class="mt-4 fw-bold" :style="{ color: actualTheme === 'Light' ? '#222' : (config.accent_color || '#d1d1d1') }">Stats Tab:</h5>
@@ -513,7 +514,7 @@ HTML_TEMPLATE = r"""
                     isSyncing: false,
                     loading: true,
                     env: { DISCORD_TOKEN: '', GOOGLE_API_KEYS: '', HF_TOKEN: '' },
-                    config: { profiles: {'Default': {}}, active_profile: 'Default', available_models: [], ai_models: [], banned_inputs: [], removed_words: [], enabled_emotions: {}, debug_modules: {}, word_replacements: {}, vip_map: {}, allowed_roles: {}, allowed_text_channels: {}, allowed_vc_channels: {}, voice_corrections: {}, tts_pronunciations: {}, auto_replies: {}, custom_stats: [], theme: 'Dark', ui_scaling: 1.0, accent_color: '#d1d1d1', enable_thinking_music: false },
+                    config: { profiles: {'Default': {}}, active_profile: 'Default', available_models: [], ai_models: [], banned_inputs: [], removed_words: [], enabled_emotions: {}, debug_modules: {}, word_replacements: {}, vip_map: {}, allowed_roles: {}, allowed_text_channels: {}, allowed_vc_channels: {}, voice_corrections: {}, tts_pronunciations: {}, auto_replies: {}, custom_stats: [], theme: 'Dark', ui_scaling: 1.0, accent_color: '#d1d1d1', enable_thinking_music: false, dynamic_emotions: false },
                     lastMtime: 0,
                     syncStatus: "Synced",
                     saveTimeout: null,
@@ -587,6 +588,7 @@ HTML_TEMPLATE = r"""
                     this.config.msg_join_vc = this.activeProfileData.msg_join_vc;
                     this.config.msg_stop_talking = this.activeProfileData.msg_stop_talking;
                     this.config.msg_vocal_cords_ready = this.activeProfileData.msg_vocal_cords_ready;
+                    this.config.msg_leave_vc = this.activeProfileData.msg_leave_vc; // <-- ADD THIS
                     
                     const res = await fetch('/api/save', {
                         method: 'POST',
@@ -653,6 +655,7 @@ HTML_TEMPLATE = r"""
                             msg_join_vc: 'hey whats up',
                             msg_stop_talking: 'my bad.',
                             msg_vocal_cords_ready: 'vocal cords ready.'
+                            msg_leave_vc: 'aw man, really? you want me to leave? fine.'
                         };
                         this.config.active_profile = name;
                         this.saveData();
