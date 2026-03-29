@@ -1358,7 +1358,7 @@ class App(ctk.CTk):
         self.make_smart_textbox(self.advanced_text)
         self.advanced_text.pack(pady=10, fill='both', expand=True, padx=10)
 
-def check_for_updates(self):
+    def check_for_updates(self):
         repo_path = self.config_data.get('github_repo_url', 'JackBJ27/DoppelBot').strip().strip('/')
         if not repo_path or '/' not in repo_path: return
             
