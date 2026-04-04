@@ -10,12 +10,14 @@ import functools
 import time
 import re
 import json
+import base64
+import array
+import math
 from datetime import datetime, timezone
 import logging
 from dotenv import load_dotenv
 import torch
 torch.set_num_threads(4)
-
 
 logging.getLogger('discord.voice_client').setLevel(logging.CRITICAL)
 import warnings
@@ -61,16 +63,16 @@ BOT_NAME = active_profile.get('bot_name', config.get('bot_name', 'DoppelBot'))
 BASE_PROMPT = active_profile.get('base_prompt', config.get('base_prompt', f'You are {BOT_NAME}. A casual, chill Discord bot.'))
 FRIENDS_CONTEXT = active_profile.get('friends_context', config.get('friends_context', ''))
 RULES = active_profile.get('rules', config.get('rules', '1. EMOTION TAG: You MUST start your response with an emotion tag like [default], [sad], [anger], [dead inside], [excited], [anxious], or [bored].\n2. NO RUTS: NEVER act exasperated every time you speak. DO NOT loop rhetorical questions. Vary your sentence structure. Do not bring up the exact same topics over and over again. Move on to new topics naturally.\n3. COMPLIANCE: If the user tells you to pick a topic, ask a question, tell a joke, or give an answer, YOU MUST DO IT IMMEDIATELY. Do not stall or deflect.\n4. TONE (CRITICAL): Have a spine, but REMEMBER THESE ARE YOUR FRIENDS. Do not resort to toxic insults or ad hominem attacks (like insulting their reading comprehension). Keep it playful, not hateful.\n5. NO ECHOING: DO NOT start by repeating the user\'s words.\n6. DYNAMIC LENGTH: Match the user\'s energy. If the user sends a short message (like "yo" or "sup"), reply with exactly 1 short, punchy sentence. If they write a long message, you can write 2 - 3 sentences. NEVER ramble just to fill space.'))
-MODEL_CANDIDATES = config.get("ai_models", ["gemma-3-27b-it", "gemma-3-12b-it", "gemma-3-4b-it", "gemma-3-1b-it", "gemma-2-27b-it", "gemma-2-9b-it", "gemini-2.5-flash"])
+MODEL_CANDIDATES = config.get("ai_models", ["gemma-4-31b-it", "gemma-4-26b-a4b-it", "gemma-4-e4b-it", "gemma-4-e2b-it", "gemma-3-27b-it", "gemma-3-12b-it", "gemma-3-4b-it", "gemma-3-1b-it", "gemma-2-27b-it", "gemma-2-9b-it", "gemini-2.5-flash"])
 ACTIVE_MODEL = None 
 TEMPERATURE = config.get("temperature", 0.85)
 
 VC_ENABLED = config.get("enable_voice", True)
 ALLOW_DM_VOICE = config.get("allow_dm_voice", True)
-ENABLE_THINKING_MUSIC = config.get("enable_thinking_music", False)
 ENABLE_STATS = config.get("enable_stats", True)
 AUTO_CHAT_ENABLED = config.get("auto_chat", True)
 AUTO_JOIN_VC = config.get("auto_join_vc", True)
+SHOW_THINKING = config.get("show_thinking", True)
 PRIMARY_CHANNEL_ID = config.get("primary_channel_id", 0)
 ALLOWED_CHANNEL_IDS = parse_ids(config.get("allowed_text_channels", {}))
 ALLOWED_VC_CHANNELS = parse_ids(config.get("allowed_vc_channels", {}))
@@ -118,10 +120,13 @@ LAST_MESSAGE_TIME = time.time()
 LAST_INTERACTED_USER_ID = None
 CONTEXT_TIMEOUT = 14400 
 LURK_CHANCE = 0.01 
-SAMPLE_SIZE = 80   
+SAMPLE_SIZE = 30   
 VOCAL_CORDS_READY = False
 IS_THINKING = False
 LAST_VC_INTERACTION = 0
+
+VC_FORCE_ANSWER = False
+PENDING_DEEP_THINK_USER = None
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -155,17 +160,7 @@ def can_user_interact(member_or_user):
     return False
 
 def start_thinking_music(vc):
-    if not config.get("enable_thinking_music", False) or not vc or vc.is_playing(): return
-    music_file = os.path.join(VOICE_DIR, "thinking.wav")
-    if os.path.exists(music_file):
-        try:
-            ffmpeg_path = os.path.join(SCRIPT_DIR, 'ffmpeg.exe')
-            executable = ffmpeg_path if os.path.exists(ffmpeg_path) else 'ffmpeg'
-            source = discord.PCMVolumeTransformer(discord.FFmpegPCMAudio(music_file, executable=executable))
-            source.volume = 0.15
-            vc.play(source)
-        except Exception as e:
-            dprint("voice", f"   -> [VOICE DEBUG] Failed to play thinking music: {e}")
+    pass # Deprecated: Handled natively by LiveAudioHose in TTS streams now for perfect overlapping!
 
 def switch_api_key():
     global CURRENT_KEY_INDEX
@@ -288,7 +283,10 @@ def is_repetitive(new_text, history_list):
 def get_web_context(query):
     dprint("brain", f"   -> [SEARCH] Snooping the web for: '{query}'")
     try:
-        results = DDGS().text(query, max_results=3, backend='duckduckgo')
+        current_month_year = datetime.now().strftime("%B %Y")
+        search_query = f"{query} {current_month_year}" if "weekend" in query.lower() or "right now" in query.lower() else query
+        
+        results = DDGS().text(search_query, max_results=6)
         results_list = list(results)
         if not results_list: return ""
         dprint("brain", f"   -> [SEARCH SUCCESS] Found {len(results_list)} results.")
@@ -298,16 +296,22 @@ def get_web_context(query):
         dprint("brain", f"   -> [SEARCH CRASH] {e}")
         return ""
 
-def get_ai_reply(current_user, conversation_history, random_memories, soul_text, target_message, context_mode="normal", web_context=""):
-    global ACTIVE_MODEL
+def get_ai_reply(current_user, conversation_history, random_memories, soul_text, target_message, context_mode="normal", web_context="", img_data=None, mime_type=None, live_queue=None):
+    global ACTIVE_MODEL, CURRENT_KEY_INDEX
     if not ACTIVE_MODEL:
         find_working_model()
-        if not ACTIVE_MODEL: return MSG_BRAIN_DISCONNECTED, "default"
+        if not ACTIVE_MODEL: 
+            if live_queue: live_queue.put(None)
+            return MSG_BRAIN_DISCONNECTED, "default"
 
-    dprint("brain", f"   [STEP 1] Generating with {ACTIVE_MODEL} (Mode: {context_mode})...")
+    if not target_message.strip() and not img_data:
+        target_message = "*pokes you*"
+
+    dprint("brain", f"   [STEP 1] Generating Text with {ACTIVE_MODEL}...")
 
     if BANNED_INPUTS:
         if any(w.lower() in target_message.lower() for w in BANNED_INPUTS): 
+            if live_queue: live_queue.put(None)
             return MSG_BANNED_INPUT, "default"
 
     clean_history = [sanitize_text_for_ai(msg) for msg in conversation_history]
@@ -319,6 +323,22 @@ def get_ai_reply(current_user, conversation_history, random_memories, soul_text,
     status_triggers = ["doing", "wyd", "what's up", "whats up", "how are"]
     health_triggers = ["you good", "you fixed", "working", "lobotomy"]
     
+    allow_think = (ACTIVE_MODEL and "gemma-4" in ACTIVE_MODEL and any(t in msg_lower for t in ["think about", "really think", "think hard", "solve"]))
+    
+    think_prefix = "<|think|>\n" if allow_think else ""
+    length_override = "\n8. DETAIL OVERRIDE: If the user asks for a list, asks you to search the web, or asks you to 'really think', YOU MUST IGNORE THE SHORT LENGTH RULE and provide a highly detailed, multi-sentence response."
+    
+    if allow_think:
+        think_rule = "CRITICAL OVERRIDE: Ignore Rule 1 temporarily. You MUST open your native thought channel FIRST using EXACTLY `<|channel>thought`. Do NOT start with an emotion tag."
+        mono_rule = "Once you finish thinking, close the channel with `<channel|>`. IMMEDIATELY after closing it, Rule 1 applies: start your spoken reply with an [emotion] tag."
+        prompt_end = "OUTPUT YOUR THOUGHTS NOW. YOU MUST START YOUR RESPONSE EXACTLY WITH:\n<|channel>thought\n"
+        max_tokens = 2560
+    else:
+        think_rule = "CRITICAL: NO CHAIN OF THOUGHT ALLOWED. You are in a fast-paced chat. DO NOT output bullet points or context summaries."
+        mono_rule = "CRITICAL: Output ONLY the final chat message. DO NOT write \"User:\", \"Input:\", or any internal monologue."
+        prompt_end = "OUTPUT YOUR REPLY INSTANTLY. NO THINKING. NO DRAFTS. THE VERY FIRST CHARACTER YOU OUTPUT MUST BE '[':"
+        max_tokens = 150
+
     special_instruction = ""
     if any(x in msg_lower for x in health_triggers): special_instruction = "*** PRIORITY: HEALTH CHECK. Say 'Yeah I'm good' or 'Fixed'. ***\n"
     elif any(x in msg_lower for x in status_triggers): special_instruction = "*** PRIORITY: STATUS. Answer with VAGUE activity. ***\n"
@@ -327,7 +347,7 @@ def get_ai_reply(current_user, conversation_history, random_memories, soul_text,
     elif context_mode.startswith("auto_ping:"):
         parts = context_mode.split(":")
         action_target = f"*** AUTO-CHAT: Randomly start a conversation with {parts[1]}. ACTION: {parts[2]}. DO NOT ping them yourself! ***"
-    else: action_target = f"*** TARGET MESSAGE (REPLY TO THIS) ***\n{current_user}: \"{target_message}\""
+    else: action_target = f"User says: \"{target_message}\""
 
     try:
         emoji_toggles = config.get("emoji_toggles", {})
@@ -340,16 +360,12 @@ def get_ai_reply(current_user, conversation_history, random_memories, soul_text,
             for k, e in emojis.items():
                 if emoji_toggles.get(k, True):
                     formatted = f":{e['name']}:"
-                    if k in fav_emojis_ids:
-                        fav_list.append(formatted)
-                    else:
-                        other_list.append(formatted)
+                    if k in fav_emojis_ids: fav_list.append(formatted)
+                    else: other_list.append(formatted)
                         
         emoji_prompt = ""
-        if fav_list:
-            emoji_prompt += f"\n*** HIGHLY PREFERRED EMOJIS (USE THESE OFTEN) ***\n{', '.join(fav_list)}\n"
-        if other_list:
-            emoji_prompt += f"\n*** OTHER AVAILABLE EMOJIS ***\n{', '.join(other_list)}\n"
+        if fav_list: emoji_prompt += f"\n*** HIGHLY PREFERRED EMOJIS (USE THESE OFTEN) ***\n{', '.join(fav_list)}\n"
+        if other_list: emoji_prompt += f"\n*** OTHER AVAILABLE EMOJIS ***\n{', '.join(other_list)}\n"
     except:
         emoji_prompt = ""
 
@@ -358,99 +374,143 @@ def get_ai_reply(current_user, conversation_history, random_memories, soul_text,
     
     for attempt in range(3):
         current_key = GOOGLE_API_KEYS[CURRENT_KEY_INDEX]
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{ACTIVE_MODEL}:generateContent?key={current_key}"
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{ACTIVE_MODEL}:streamGenerateContent?alt=sse&key={current_key}"
         
         valid_tags = "[default], [sad], [anger], [dead inside], [excited], [anxious], [bored]"
         dyn_rule = f"\n7. DYNAMIC EMOTIONS (CRITICAL): You MUST change tone when the topic shifts. You are STRICTLY LIMITED to ONLY these exact tags: {valid_tags}. Place tags at the START of a sentence or mid-sentence. NEVER put a tag at the very end of a message or right before punctuation. You MUST write actual words after every tag." if config.get("dynamic_emotions", False) else ""
         
-        full_prompt = f"""
-        {BASE_PROMPT} It is currently {current_time_str}.
-        {web_context}
-        {emoji_prompt}
-        
-        *** FRIENDS CONTEXT ***
-        {FRIENDS_CONTEXT}
-        
+        system_text = f"""{think_prefix}*** CORE OPERATING DIRECTIVE ***
+        CRITICAL DIRECTIVE: You are a direct text-to-speech engine.
+{think_rule}
+{mono_rule}
+
+{BASE_PROMPT} It is currently {current_time_str}.
+{emoji_prompt}
+*** FRIENDS CONTEXT ***
+{FRIENDS_CONTEXT}
+*** SOUL (BACKGROUND INFO) ***
+{soul_text}
+*** CRITICAL RULES ***
+{RULES}{dyn_rule}{length_override}
+*** STYLE EXAMPLES ***
+{memory_text}"""
+
+        full_prompt = f"""{web_context}
         *** PAST CONTEXT ***
-        {history_text}
-        
-        *** SOUL (BACKGROUND INFO) ***
-        {soul_text}
-        
-        *** STYLE EXAMPLES ***
-        {memory_text}
-        
-        {special_instruction}{action_target}
-        {retry_note}
-        
-        *** CRITICAL RULES ***
-        {RULES}{dyn_rule}
-        
-        REPLY:
-        """
+{history_text}
+
+{special_instruction}{action_target}
+{retry_note}
+
+{prompt_end}"""
+
+        parts_list = [{"text": full_prompt}]
+        if img_data and mime_type:
+            parts_list.append({
+                "inlineData": {
+                    "mimeType": mime_type,
+                    "data": img_data
+                }
+            })
 
         payload = {
-            "contents": [{ "parts": [{"text": full_prompt}] }],
+            "systemInstruction": {"parts": [{"text": system_text}]},
+            "contents": [{ "parts": parts_list }],
             "safetySettings": [
                 {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
                 {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
                 {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
                 {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"}
             ],
-            "generationConfig": {"temperature": TEMPERATURE, "topK": 40, "maxOutputTokens": 150}
+            "generationConfig": {"temperature": TEMPERATURE, "topK": 40, "maxOutputTokens": max_tokens}
         }
 
         try:
-            response = API_SESSION.post(url, json=payload, timeout=60)
+            response = API_SESSION.post(url, json=payload, stream=True, timeout=120)
             if response.status_code == 200:
-                data = response.json()
-                if 'candidates' in data and data['candidates']:
-                    raw_text = data['candidates'][0]['content']['parts'][0]['text'].strip()
-                    emotion = "default"
-                    emotion_match = re.match(r'^\[(.*?)\]\s*(.*)', raw_text, re.IGNORECASE | re.DOTALL)
-                    if emotion_match:
-                        extracted_emo = emotion_match.group(1).lower()
-                        valid_emotions = ["default", "sad", "anger", "dead inside", "excited", "anxious", "bored"]
-                        if extracted_emo in valid_emotions: emotion = extracted_emo
-                        text = emotion_match.group(2).strip()
-                    else: text = raw_text
+                response.encoding = 'utf-8'
+                raw_text = ""
+                for line in response.iter_lines(decode_unicode=True):
+                    if line and line.startswith("data: "):
+                        try:
+                            json_data = json.loads(line[6:])
+                            if 'candidates' in json_data and json_data['candidates']:
+                                text_part = json_data['candidates'][0]['content']['parts'][0]['text']
+                                raw_text += text_part
+                                if live_queue is not None:
+                                    live_queue.put(text_part)
+                        except Exception: pass
+                
+                if live_queue is not None:
+                    live_queue.put(None)
+                
+                raw_text = raw_text.replace('’', "'").replace('‘', "'").replace('“', '"').replace('”', '"')
+                dprint("brain", f"   -> [RAW TEXT OUTPUT] {raw_text.strip()}")
+                
+                valid_emotions = ["default", "sad", "anger", "dead inside", "excited", "anxious", "bored"]
+                
+                if not raw_text.startswith('['):
+                    pattern = r'\[(' + '|'.join(valid_emotions) + r')\]'
+                    matches = list(re.finditer(pattern, raw_text, re.IGNORECASE))
+                    if matches:
+                        last_match = matches[-1]
+                        raw_text = raw_text[last_match.start():].strip()
 
-                    if REMOVED_WORDS:
-                        words_pattern = '|'.join(map(re.escape, REMOVED_WORDS))
-                        text = re.sub(rf'^(\[.*?\]\s*)?({words_pattern}),?\s*', r'\1', text, flags=re.IGNORECASE)
-
-                    for bad_phrase, good_phrase in WORD_REPLACEMENTS.items():
-                        text = re.sub(re.escape(bad_phrase), good_phrase, text, flags=re.IGNORECASE)
-
-                    if FORCE_LOWERCASE:
-                        words = text.split(" ")
-                        fixed_words = []
-                        for w in words:
-                            if w.startswith(":") and w.endswith(":"): fixed_words.append(w)
-                            elif w.isupper() and len(re.sub(r'[^A-Z]', '', w)) > 1: fixed_words.append(w) 
-                            else: fixed_words.append(w.lower())
-                        text = " ".join(fixed_words)
-
-                    text = cleanup_response(text)
+                emotion = "default"
+                emotion_match = re.match(r'^\[(.*?)\]\s*(.*)', raw_text, re.IGNORECASE | re.DOTALL)
+                if emotion_match:
+                    extracted_emo = emotion_match.group(1).lower()
+                    if extracted_emo in valid_emotions: emotion = extracted_emo
+                    text = emotion_match.group(2).strip()
                     
-                    if len(target_message) > 4 and text.lower().startswith(target_message.lower()[:15]):
-                         retry_note = f"\n*** ALERT: You echoed the user. Write a NEW response. ***"
-                         continue
+                    if '\n\n' in text:
+                        text = text.split('\n\n')[0].strip()
+                else: text = raw_text
 
-                    if is_repetitive(text, clean_history):
-                        if attempt == 2: return text + " lol", emotion
-                        retry_note = f"\n*** ALERT: You already said '{text}'. Say something NEW. ***"
-                        continue
-                    return text, emotion
-                else: return MSG_SAFETY_FILTER, "default"
+                if REMOVED_WORDS:
+                    words_pattern = '|'.join(map(re.escape, REMOVED_WORDS))
+                    text = re.sub(rf'^(\[.*?\]\s*)?({words_pattern}),?\s*', r'\1', text, flags=re.IGNORECASE)
+
+                for bad_phrase, good_phrase in WORD_REPLACEMENTS.items():
+                    text = re.sub(re.escape(bad_phrase), good_phrase, text, flags=re.IGNORECASE)
+
+                if FORCE_LOWERCASE:
+                    words = text.split(" ")
+                    fixed_words = []
+                    for w in words:
+                        if w.startswith(":") and w.endswith(":"): fixed_words.append(w)
+                        elif w.isupper() and len(re.sub(r'[^A-Z]', '', w)) > 1: fixed_words.append(w) 
+                        else: fixed_words.append(w.lower())
+                    text = " ".join(fixed_words)
+
+                text = cleanup_response(text)
+                
+                if not text.strip():
+                    dprint("brain", "   -> [WARNING] Text was empty after filtering. Retrying...")
+                    retry_note = "\n*** ALERT: Your response was empty. You MUST output actual words! ***"
+                    continue
+                
+                if len(target_message) > 4 and text.lower().startswith(target_message.lower()[:15]):
+                     retry_note = f"\n*** ALERT: You echoed the user. Write a NEW response. ***"
+                     continue
+
+                if is_repetitive(text, clean_history):
+                    if attempt == 2: return text + " lol", emotion
+                    retry_note = f"\n*** ALERT: You already said '{text}'. Say something NEW. ***"
+                    continue
+                return text, emotion
             elif response.status_code == 429: switch_api_key(); time.sleep(1)    
             else: time.sleep(2)
-        except: time.sleep(2)
+        except Exception as e: 
+            dprint("brain", f"   -> [API ERROR] {e}")
+            time.sleep(2)
 
-    return MSG_SAFETY_FILTER, "default"
+    if live_queue is not None:
+        live_queue.put(None)
+    return "*stares silently*", "default"
 
 def get_ai_reply_stream(user_name, history_text, memories, soul_text, target_msg, mode, text_queue, web_context=""):
-    global ACTIVE_MODEL, CURRENT_KEY_INDEX
+    global ACTIVE_MODEL, CURRENT_KEY_INDEX, VC_FORCE_ANSWER
     if not ACTIVE_MODEL:
         find_working_model()
         if not ACTIVE_MODEL: 
@@ -468,6 +528,28 @@ def get_ai_reply_stream(user_name, history_text, memories, soul_text, target_msg
     status_triggers = ["doing", "wyd", "what's up", "whats up", "how are"]
     health_triggers = ["you good", "you fixed", "working", "lobotomy"]
     
+    target_msg_lower = target_msg.lower().strip()
+    allow_think = False
+    if ACTIVE_MODEL and "gemma-4" in ACTIVE_MODEL:
+        if target_msg.startswith("I want you to really think about this: "):
+            allow_think = True
+        elif any(t in target_msg_lower for t in ["think hard", "step by step", "solve this", "really think about"]):
+            allow_think = True
+            
+    think_prefix = "<|think|>\n" if allow_think else ""
+    length_override = "\n8. DETAIL OVERRIDE: If the user asks for a list, asks you to search the web, or asks you to 'really think', YOU MUST IGNORE THE SHORT LENGTH RULE and provide a highly detailed, multi-sentence response."
+    
+    if allow_think:
+        think_rule = "CRITICAL OVERRIDE: Ignore Rule 1 temporarily. You MUST open your native thought channel FIRST using EXACTLY `<|channel>thought`. Do NOT start with an emotion tag."
+        mono_rule = "Once you finish thinking, close the channel with `<channel|>`. IMMEDIATELY after closing it, Rule 1 applies: start your spoken reply with an [emotion] tag."
+        prompt_end = "OUTPUT YOUR THOUGHTS NOW. YOU MUST START YOUR RESPONSE EXACTLY WITH:\n<|channel>thought\n"
+        max_tokens = 2560
+    else:
+        think_rule = "CRITICAL: NO CHAIN OF THOUGHT ALLOWED. You are in a fast-paced chat. DO NOT output bullet points or context summaries."
+        mono_rule = "CRITICAL: Output ONLY the final chat message. DO NOT write \"User:\", \"Input:\", or any internal monologue."
+        prompt_end = "OUTPUT YOUR SPOKEN REPLY INSTANTLY. NO THINKING. NO DRAFTS. THE VERY FIRST CHARACTER MUST BE '[':"
+        max_tokens = 150
+
     special_instruction = ""
     if any(x in msg_lower for x in health_triggers): special_instruction = "*** PRIORITY: HEALTH CHECK. Say 'Yeah I'm good' or 'Fixed'. ***\n"
     elif any(x in msg_lower for x in status_triggers): special_instruction = "*** PRIORITY: STATUS. Answer with VAGUE activity. ***\n"
@@ -476,7 +558,7 @@ def get_ai_reply_stream(user_name, history_text, memories, soul_text, target_msg
     elif mode.startswith("auto_ping:"):
         parts = mode.split(":")
         action_target = f"*** AUTO-CHAT: Randomly start a conversation with {parts[1]}. ACTION: {parts[2]}. DO NOT ping them yourself! ***"
-    else: action_target = f"*** TARGET MESSAGE (REPLY TO THIS) ***\n{user_name}: \"{target_msg}\""
+    else: action_target = f"User says: \"{target_msg}\""
 
     try:
         emoji_toggles = config.get("emoji_toggles", {})
@@ -507,30 +589,34 @@ def get_ai_reply_stream(user_name, history_text, memories, soul_text, target_msg
         valid_tags = "[default], [sad], [anger], [dead inside], [excited], [anxious], [bored]"
         dyn_rule = f"\n7. DYNAMIC EMOTIONS (CRITICAL): You MUST change tone when the topic shifts. You are STRICTLY LIMITED to ONLY these exact tags: {valid_tags}. Place tags at the START of a sentence or mid-sentence. NEVER put a tag at the very end of a message or right before punctuation. You MUST write actual words after every tag." if config.get("dynamic_emotions", False) else ""
         
-        full_prompt = f"""
+        system_text = f"""{think_prefix}*** CORE OPERATING DIRECTIVE ***
+        CRITICAL DIRECTIVE: You are a direct text-to-speech engine.
+        {think_rule}
+        {mono_rule}
+        
         {BASE_PROMPT} It is currently {current_time_str}.
-        {web_context}
         {emoji_prompt}
-        
-        *** PAST CONTEXT ***
-        {history_text}
-        
+        *** FRIENDS CONTEXT ***
+        {FRIENDS_CONTEXT}
         *** SOUL (BACKGROUND INFO) ***
         {soul_text}
-        
+        *** CRITICAL RULES ***
+        {RULES}{dyn_rule}{length_override}
         *** STYLE EXAMPLES ***
-        {memories}
+        {memories}"""
+
+        full_prompt = f"""{web_context}
+        *** PAST CONTEXT ***
+        {history_text}
         
         {special_instruction}{action_target}
         {retry_note}
         
-        *** CRITICAL RULES ***
-        {RULES}{dyn_rule}
-        
-        REPLY:
+        {prompt_end}
         """
 
         payload = {
+            "systemInstruction": {"parts": [{"text": system_text}]},
             "contents": [{ "parts": [{"text": full_prompt}] }],
             "safetySettings": [
                 {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
@@ -538,43 +624,101 @@ def get_ai_reply_stream(user_name, history_text, memories, soul_text, target_msg
                 {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
                 {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"}
             ],
-            "generationConfig": {"temperature": TEMPERATURE, "topK": 40, "maxOutputTokens": 150}
+            "generationConfig": {"temperature": TEMPERATURE, "topK": 40, "maxOutputTokens": max_tokens}
         }
 
         try:
-            response = API_SESSION.post(url, json=payload, stream=True, timeout=60)
+            response = API_SESSION.post(url, json=payload, stream=True, timeout=180)
             if response.status_code == 200:
                 response.encoding = 'utf-8'
                 full_response = ""
                 chunk_buffer = ""
+                raw_buffer = ""
+                
+                has_found_emotion = False 
+                is_in_think_block = False
+                
+                start_stream_time = time.time()
+                VC_FORCE_ANSWER = False
+                was_interrupted = False
                 
                 for line in response.iter_lines(decode_unicode=True):
+                    
+                    timeout_limit = 90 if allow_think else 20
+                    if VC_FORCE_ANSWER or (time.time() - start_stream_time > timeout_limit):
+                        was_interrupted = True
+                        break
+                        
                     if line and line.startswith("data: "):
                         try:
                             json_data = json.loads(line[6:])
                             if 'candidates' in json_data and json_data['candidates']:
                                 text_part = json_data['candidates'][0]['content']['parts'][0]['text']
-                                
                                 text_part = text_part.replace('’', "'").replace('‘', "'").replace('“', '"').replace('”', '"')
                                 
                                 full_response += text_part 
-                                chunk_buffer += text_part
+                                raw_buffer += text_part
+                                
+                                if not has_found_emotion:
+                                    pattern = r'\[(' + '|'.join(["default", "sad", "anger", "dead inside", "excited", "anxious", "bored"]) + r')\]'
+                                    
+                                    if allow_think:
+                                        is_thinking_done = "<channel|>" in full_response.lower()
+                                        skipped_thinking = "<|channel>" not in full_response[:50].lower() and "[" in full_response[:50]
+                                        
+                                        if is_thinking_done:
+                                            valid_text = re.split(r'<channel\|>', full_response, flags=re.IGNORECASE)[-1]
+                                            match = re.search(pattern, valid_text, re.IGNORECASE)
+                                            if match:
+                                                has_found_emotion = True
+                                                raw_buffer = valid_text[match.start():]
+                                            elif len(valid_text) > 25 and "[" not in valid_text[:25]:
+                                                has_found_emotion = True
+                                                raw_buffer = valid_text
+                                            else:
+                                                raw_buffer = "" 
+                                                continue
+                                        elif skipped_thinking:
+                                            valid_text = full_response
+                                            match = re.search(pattern, valid_text, re.IGNORECASE)
+                                            if match:
+                                                has_found_emotion = True
+                                                raw_buffer = valid_text[match.start():]
+                                            elif len(valid_text) > 25 and "[" not in valid_text[:25]:
+                                                has_found_emotion = True
+                                                raw_buffer = valid_text
+                                            else:
+                                                raw_buffer = "" 
+                                                continue
+                                        else:
+                                            raw_buffer = "" 
+                                            if len(full_response) > 8000: 
+                                                has_found_emotion = True 
+                                            continue
+                                    else:
+                                        match = re.search(pattern, raw_buffer, re.IGNORECASE)
+                                        if match:
+                                            has_found_emotion = True
+                                            raw_buffer = raw_buffer[match.start():]
+                                        elif len(raw_buffer) > 25 and "[" not in raw_buffer[:25]:
+                                            has_found_emotion = True
+                                        else:
+                                            continue
+                                
+                                chunk_buffer += raw_buffer
+                                raw_buffer = ""
                                 
                                 while True:
                                     m_punct = re.search(r'[\.\!\?]+(\s|$)', chunk_buffer)
                                     m_tag = re.search(r'\[[a-zA-Z ]+\]', chunk_buffer)
                                     
                                     pts = []
-                                    if m_punct:
-                                        pts.append(('punct', m_punct.end()))
-                                    if m_tag:
-                                        if m_tag.start() > 0:
-                                            pts.append(('tag_start', m_tag.start()))
-                                        else:
-                                            pts.append(('tag_end', m_tag.end()))
+                                    if m_punct: pts.append(('punct', m_punct.end()))
+                                    
+                                    if m_tag and m_tag.start() > 0: 
+                                        pts.append(('tag_start', m_tag.start()))
 
-                                    if not pts:
-                                        break
+                                    if not pts: break
 
                                     pts.sort(key=lambda x: x[1])
                                     split_idx = pts[0][1]
@@ -582,10 +726,66 @@ def get_ai_reply_stream(user_name, history_text, memories, soul_text, target_msg
                                     if split_idx > 0:
                                         text_queue.put(chunk_buffer[:split_idx])
                                         chunk_buffer = chunk_buffer[split_idx:]
-                                    else:
-                                        break
+                                    else: break
                         except Exception: pass
                             
+                response.close()
+                            
+                if was_interrupted:
+                    while not text_queue.empty():
+                        try: text_queue.get_nowait()
+                        except: pass
+                        
+                    ack = "[anxious] alright fine! " if VC_FORCE_ANSWER else "[anxious] my brain short circuited, give me a sec. "
+                    text_queue.put(ack)
+                    
+                    quick_sys = system_text.replace(think_rule, "CRITICAL: NO CHAIN OF THOUGHT ALLOWED. DO NOT THINK. JUST ANSWER.")
+                    quick_prompt = full_prompt.replace(prompt_end, "OUTPUT YOUR SPOKEN REPLY INSTANTLY. NO DRAFTS. NO THINKING:")
+                    
+                    quick_payload = {
+                        "systemInstruction": {"parts": [{"text": quick_sys}]},
+                        "contents": [{ "parts": [{"text": quick_prompt}] }],
+                        "safetySettings": payload["safetySettings"],
+                        "generationConfig": {"temperature": TEMPERATURE, "topK": 40, "maxOutputTokens": 250}
+                    }
+                    
+                    sync_url = f"https://generativelanguage.googleapis.com/v1beta/models/{ACTIVE_MODEL}:generateContent?key={current_key}"
+                    try:
+                        q_res = API_SESSION.post(sync_url, json=quick_payload, timeout=10)
+                        if q_res.status_code == 200:
+                            q_text = q_res.json()['candidates'][0]['content']['parts'][0]['text']
+                            q_text = q_text.replace('’', "'").replace('‘', "'").replace('“', '"').replace('”', '"')
+                            
+                            q_text = re.sub(r'<\|channel>thought.*?<channel\|>', '', q_text, flags=re.DOTALL | re.IGNORECASE)
+                            q_text = re.sub(r'<think>.*?</think>', '', q_text, flags=re.DOTALL | re.IGNORECASE)
+                            q_text = cleanup_response(q_text.strip())
+                            
+                            text_queue.put(q_text)
+                            text_queue.put(None)
+                            return ack + q_text, "anxious"
+                    except Exception as e:
+                        print(f"[FALLBACK API ERROR] {e}")
+                        
+                    text_queue.put("honestly i totally lost my train of thought though.")
+                    text_queue.put(None)
+                    return ack + "honestly i totally lost my train of thought though.", "anxious"
+                            
+                full_response = re.sub(r'<\|channel>thought.*?<channel\|>', '', full_response, flags=re.DOTALL | re.IGNORECASE).strip()
+                full_response = re.sub(r'<think>.*?</think>', '', full_response, flags=re.DOTALL | re.IGNORECASE).strip()
+                full_response = re.sub(r'<\|channel>thought.*$', '', full_response, flags=re.DOTALL | re.IGNORECASE).strip() 
+                full_response = re.sub(r'<think>.*$', '', full_response, flags=re.DOTALL | re.IGNORECASE).strip()
+
+                valid_emotions = ["default", "sad", "anger", "dead inside", "excited", "anxious", "bored"]
+                pattern = r'\[(' + '|'.join(valid_emotions) + r')\]'
+                
+                matches = list(re.finditer(pattern, full_response, re.IGNORECASE))
+                if matches:
+                    last_match = matches[-1]
+                    full_response = full_response[last_match.start():].strip()
+                    
+                    if '\n\n' in full_response:
+                        full_response = full_response.split('\n\n')[0].strip()
+                    
                 if chunk_buffer.strip():
                     text_queue.put(chunk_buffer)
                     
@@ -687,23 +887,58 @@ async def play_stalling_audio(vc):
                 index = (index + 1) % len(stall_files)
         await asyncio.sleep(4)
 
+
 class LiveAudioHose(discord.AudioSource):
-    def __init__(self):
+    def __init__(self, bg_music_path=None, bg_volume=0.15):
         self.queue = deque()
         self.finished = False
         self.is_starving = False
+        self.bg_raw = b''
+        self.bg_pos = 0
+        self.play_bg = False
         
+        if bg_music_path and os.path.exists(bg_music_path):
+            try:
+                seg = AudioSegment.from_wav(bg_music_path).set_frame_rate(48000).set_channels(2).set_sample_width(2)
+                db_change = 20 * math.log10(bg_volume) if bg_volume > 0 else -100
+                seg = seg + db_change
+                self.bg_raw = seg.raw_data
+                self.play_bg = True
+            except: pass
+
     def read(self):
+        frame = b''
         if self.queue:
             self.is_starving = False
-            return self.queue.popleft()
-        
-        if self.finished:
+            frame = self.queue.popleft()
+        elif self.finished:
             return b''
         else:
             self.is_starving = True
-            return b'\x00' * 3840
+            frame = b'\x00' * 3840
+        
+        if self.play_bg and self.bg_raw:
+            bg_frame = bytearray()
+            while len(bg_frame) < 3840:
+                rem = 3840 - len(bg_frame)
+                avail = len(self.bg_raw) - self.bg_pos
+                take = min(rem, avail)
+                bg_frame.extend(self.bg_raw[self.bg_pos:self.bg_pos+take])
+                self.bg_pos += take
+                if self.bg_pos >= len(self.bg_raw):
+                    self.bg_pos = 0
             
+            arr1 = array.array('h', frame)
+            arr2 = array.array('h', bg_frame)
+            for i in range(len(arr1)):
+                val = arr1[i] + arr2[i]
+                if val > 32767: val = 32767
+                elif val < -32768: val = -32768
+                arr1[i] = val
+            return arr1.tobytes()
+        
+        return frame
+        
     def add_audio(self, pydub_segment):
         self.is_starving = False
         seg = pydub_segment.set_frame_rate(48000).set_channels(2).set_sample_width(2)
@@ -715,6 +950,9 @@ class LiveAudioHose(discord.AudioSource):
             
     def stop(self):
         self.finished = True
+        
+    def stop_bg(self):
+        self.play_bg = False
 
 def cpu_optimized_generate(model, state, text):
     import torch
@@ -775,8 +1013,12 @@ async def generate_and_play_tts(vc_client, text, base_emotion="default"):
         
     if getattr(vc_client, '_current_tts_id', None) != my_tts_id: return
         
-    hose = LiveAudioHose()
-    vc_client.play(hose) 
+    enable_music = config.get("enable_thinking_music", False)
+    bg_path = os.path.join(VOICE_DIR, "thinking.wav") if enable_music else None
+    hose = LiveAudioHose(bg_music_path=bg_path, bg_volume=0.15)
+    
+    if enable_music:
+        vc_client.play(hose)
     
     held_back_audio = None
     previous_emo = None
@@ -790,6 +1032,11 @@ async def generate_and_play_tts(vc_client, text, base_emotion="default"):
         state = voice_states.get(emo, voice_states.get("default"))
         try:
             audio_tensor = await client.loop.run_in_executor(None, functools.partial(cpu_optimized_generate, tts_model, state, chunk_text))
+            
+            if i == 0:
+                hose.stop_bg()
+                if not enable_music:
+                    vc_client.play(hose)
             
             if not vc_client.is_connected() or getattr(vc_client, '_current_tts_id', None) != my_tts_id: break
                 
@@ -839,8 +1086,17 @@ async def generate_and_play_tts_stream(vc_client, text_queue, base_emotion="defa
         
     if getattr(vc_client, '_current_tts_id', None) != my_tts_id: return
         
-    hose = LiveAudioHose()
+    enable_music = config.get("enable_thinking_music", False)
+    enable_fillers = config.get("enable_filler_audio", True)
+    overlap = config.get("overlap_filler_music", False)
+    
+    bg_path = os.path.join(VOICE_DIR, "thinking.wav") if enable_music else None
+    hose = LiveAudioHose(bg_music_path=bg_path, bg_volume=0.15)
+    
     playback_started = False
+    if enable_music:
+        vc_client.play(hose)
+        playback_started = True
     
     held_back_audio = None
     current_emo = base_emotion
@@ -862,21 +1118,25 @@ async def generate_and_play_tts_stream(vc_client, text_queue, base_emotion="defa
         if time_waiting > 0.8 and time_since_filler > current_cooldown:
             if not playback_started or hose.is_starving or len(hose.queue) < 15:
                 
-                if consecutive_fillers >= 2:
-                    f_choices = ["big_sigh.wav", "sigh.wav", "chatter.wav"]
-                else:
-                    f_choices = ["hmmm.wav", "um.wav", "uhhh.wav"]
-                    
-                f_file = os.path.join(VOICE_DIR, random.choice(f_choices))
-                if os.path.exists(f_file):
-                    try:
-                        hose.add_audio(AudioSegment.from_wav(f_file))
-                        if not playback_started:
-                            vc_client.play(hose)
-                            playback_started = True
-                        last_filler_time = time.time()
-                        consecutive_fillers += 1 # Bump the multiplier
-                    except: pass
+                if enable_fillers:
+                    if enable_music and not overlap and hose.play_bg:
+                        pass 
+                    else:
+                        if consecutive_fillers >= 2:
+                            f_choices = ["big_sigh.wav", "sigh.wav", "chatter.wav"]
+                        else:
+                            f_choices = ["hmmm.wav", "um.wav", "uhhh.wav"]
+                            
+                        f_file = os.path.join(VOICE_DIR, random.choice(f_choices))
+                        if os.path.exists(f_file):
+                            try:
+                                hose.add_audio(AudioSegment.from_wav(f_file))
+                                if not playback_started:
+                                    vc_client.play(hose)
+                                    playback_started = True
+                                last_filler_time = time.time()
+                                consecutive_fillers += 1 
+                            except: pass
 
         try:
             raw_chunk = text_queue.get_nowait()
@@ -931,24 +1191,31 @@ async def generate_and_play_tts_stream(vc_client, text_queue, base_emotion="defa
         
         try:
             time_since_filler = time.time() - last_filler_time
-            if playback_started and len(hose.queue) < 40 and time_since_filler > 1.8:
-                f_file = os.path.join(VOICE_DIR, random.choice(["hmmm.wav", "um.wav"]))
-                if os.path.exists(f_file):
-                    try:
-                        hose.add_audio(AudioSegment.from_wav(f_file))
-                        last_filler_time = time.time()
-                    except: pass
-            elif not playback_started and (time.time() - last_audio_push_time) > 0.5 and time_since_filler > 1.8:
-                f_file = os.path.join(VOICE_DIR, random.choice(["hmmm.wav", "um.wav"]))
-                if os.path.exists(f_file):
-                    try:
-                        hose.add_audio(AudioSegment.from_wav(f_file))
-                        vc_client.play(hose)
-                        playback_started = True
-                        last_filler_time = time.time()
-                    except: pass
+            if enable_fillers:
+                can_play_minor_filler = True
+                if enable_music and not overlap and hose.play_bg: can_play_minor_filler = False
+                
+                if can_play_minor_filler:
+                    if playback_started and len(hose.queue) < 40 and time_since_filler > 1.8:
+                        f_file = os.path.join(VOICE_DIR, random.choice(["hmmm.wav", "um.wav"]))
+                        if os.path.exists(f_file):
+                            try:
+                                hose.add_audio(AudioSegment.from_wav(f_file))
+                                last_filler_time = time.time()
+                            except: pass
+                    elif not playback_started and (time.time() - last_audio_push_time) > 0.5 and time_since_filler > 1.8:
+                        f_file = os.path.join(VOICE_DIR, random.choice(["hmmm.wav", "um.wav"]))
+                        if os.path.exists(f_file):
+                            try:
+                                hose.add_audio(AudioSegment.from_wav(f_file))
+                                vc_client.play(hose)
+                                playback_started = True
+                                last_filler_time = time.time()
+                            except: pass
 
             audio_tensor = await client.loop.run_in_executor(None, functools.partial(cpu_optimized_generate, tts_model, state, clean_chunk))
+            
+            hose.stop_bg()
             
             last_audio_push_time = time.time()
             consecutive_fillers = 0
@@ -990,7 +1257,7 @@ async def generate_and_play_tts_stream(vc_client, text_queue, base_emotion="defa
     hose.stop()
     
 async def handle_transcription(user_id, text, vc_client, forced_emotion=None):
-    global IS_THINKING, LAST_VC_INTERACTION
+    global IS_THINKING, LAST_VC_INTERACTION, VC_FORCE_ANSWER, PENDING_DEEP_THINK_USER
     
     member = vc_client.guild.get_member(user_id)
     display_name = getattr(member, 'display_name', f'User_{user_id}')
@@ -1002,7 +1269,10 @@ async def handle_transcription(user_id, text, vc_client, forced_emotion=None):
     
     vc_history = load_file(VC_BRAIN_FILE)
     vc_history.append(f'{user_name}: {clean_text}')
-    if len(vc_history) > 10: vc_history = vc_history[-10:]
+    
+    history_limit = 15 if ACTIVE_MODEL and "gemma-4" in ACTIVE_MODEL else 10
+    if len(vc_history) > history_limit: vc_history = vc_history[-history_limit:]
+    
     with open(VC_BRAIN_FILE, 'w', encoding='utf-8') as f: f.write('\n'.join(vc_history) + '\n')
 
     last_time = STAT_COOLDOWNS.get(user_id, 0)
@@ -1016,6 +1286,18 @@ async def handle_transcription(user_id, text, vc_client, forced_emotion=None):
 
     is_addressed = BOT_NAME.lower() in clean_text
     is_active_convo = (time.time() - LAST_VC_INTERACTION) < 60 
+    
+    if "answer already" in clean_text.lower() and IS_THINKING:
+        dprint("voice", "   -> [VOICE DEBUG] Forcing answer...")
+        VC_FORCE_ANSWER = True
+        return
+
+    queue_pattern = r'really think about|think about what i\'?m (going to|gonna) say'
+    match = re.search(queue_pattern, clean_text.lower())
+    if match and len(clean_text) < 120 and not re.search(r'\b(what|why|how|who|where|when|solve|calculate|are|is|do|does|can|will)\b', clean_text.lower()):
+        PENDING_DEEP_THINK_USER = user_id
+        client.loop.create_task(generate_and_play_tts(vc_client, "[excited] alright, i'm ready. hit me with it."))
+        return
     
     if is_addressed or is_active_convo:
         LAST_VC_INTERACTION = time.time()
@@ -1041,7 +1323,6 @@ async def handle_transcription(user_id, text, vc_client, forced_emotion=None):
             return
         if IS_THINKING or (vc_client and vc_client.is_playing()): return
         IS_THINKING = True
-        start_thinking_music(vc_client)
     else: return
 
     try:
@@ -1049,8 +1330,14 @@ async def handle_transcription(user_id, text, vc_client, forced_emotion=None):
         memories = load_file(BRAIN_FILE)
         if len(memories) > SAMPLE_SIZE: memories = random.sample(memories, SAMPLE_SIZE)
         
+        if PENDING_DEEP_THINK_USER == user_id:
+            target_message = "I want you to really think about this: " + clean_text
+            PENDING_DEEP_THINK_USER = None
+        else:
+            target_message = clean_text
+            
         web_context = ""
-        search_triggers = ["look up ", "search for ", "what is ", "what are ", "what's ", "whats ", "what movies ", "what games ", "what shows ", "who is ", "who are ", "where is ", "where are ", "when is ", "when does ", "how do ", "how to ", "how much ", "why is ", "why does ", "have you seen ", "did you see ", "can you find ", "what "]
+        search_triggers = ["search the web for ", "google ", "look up ", "search for ", "what is ", "what are ", "what's ", "whats ", "what movies ", "what games ", "what shows ", "who is ", "who are ", "where is ", "where are ", "when is ", "when does ", "how do ", "how to ", "how much ", "why is ", "why does ", "have you seen ", "did you see ", "can you find ", "what "]
         blacklist = ["up", "good", "doing", "going on", "happening", "wrong", "matter", "you mean", "about", "the point", "are you", "you doing", "did you say", "do you want"]
         
         for trigger in search_triggers:
@@ -1071,7 +1358,7 @@ async def handle_transcription(user_id, text, vc_client, forced_emotion=None):
         live_queue = queue.Queue()
         
         brain_task = client.loop.run_in_executor(
-            None, functools.partial(get_ai_reply_stream, user_name, clean_history, clean_memories, soul, clean_text, "normal", live_queue, web_context)
+            None, functools.partial(get_ai_reply_stream, user_name, clean_history, clean_memories, soul, target_message, "normal", live_queue, web_context)
         )
         
         await generate_and_play_tts_stream(vc_client, live_queue, final_emotion)
@@ -1081,7 +1368,10 @@ async def handle_transcription(user_id, text, vc_client, forced_emotion=None):
         if full_reply:
             dprint("voice", f"   -> [VOICE DEBUG] Full memory saved: '{full_reply}'")
             vc_history.append(f"{BOT_NAME}: {full_reply}")
-            if len(vc_history) > 10: vc_history = vc_history[-10:]
+            
+            history_limit = 15 if ACTIVE_MODEL and "gemma-4" in ACTIVE_MODEL else 10
+            if len(vc_history) > history_limit: vc_history = vc_history[-history_limit:]
+            
             with open(VC_BRAIN_FILE, "w", encoding="utf-8") as f: f.write("\n".join(vc_history) + "\n")
                 
         LAST_VC_INTERACTION = time.time() 
@@ -1169,7 +1459,9 @@ async def auto_chat_loop():
 
                 history_log = []
                 try:
-                    async for past_msg in channel.history(limit=5):
+                    if not ACTIVE_MODEL: await client.loop.run_in_executor(None, find_working_model)
+                    history_limit = 10 if ACTIVE_MODEL and "gemma-4" in ACTIVE_MODEL else 5
+                    async for past_msg in channel.history(limit=history_limit):
                         p_auth = VIP_MAP.get(past_msg.author.id, getattr(past_msg.author, 'display_name', past_msg.author.name))
                         history_log.append(f"{p_auth}: {past_msg.content}")
                     history_log.reverse()
@@ -1360,7 +1652,6 @@ async def on_message(message):
                 text_to_speak = clean_content[4:].strip()
                 if not text_to_speak: return 
                 while vc_client.is_playing(): await asyncio.sleep(0.5)
-                start_thinking_music(vc_client)
                 await generate_and_play_tts(vc_client, f"{user_name} says: {text_to_speak}", forced_emo or "default")
                 await message.add_reaction("🎤")
                 
@@ -1368,7 +1659,6 @@ async def on_message(message):
                 text_to_speak = clean_content[6:].strip()
                 if not text_to_speak: return
                 while vc_client.is_playing(): await asyncio.sleep(0.5)
-                start_thinking_music(vc_client)
                 await generate_and_play_tts(vc_client, text_to_speak, forced_emo or "default")
                 await message.add_reaction("👻")
                 
@@ -1568,7 +1858,9 @@ async def on_message(message):
     if should_reply:
         history_log = []
         try:
-            async for past_msg in message.channel.history(limit=8):
+            if not ACTIVE_MODEL: await client.loop.run_in_executor(None, find_working_model)
+            history_limit = 10 if ACTIVE_MODEL and "gemma-4" in ACTIVE_MODEL else 8
+            async for past_msg in message.channel.history(limit=history_limit):
                 if past_msg.created_at.timestamp() < LAST_RESET_TIMESTAMP: continue
                 p_auth = VIP_MAP.get(past_msg.author.id, getattr(past_msg.author, 'display_name', past_msg.author.name))
                 prefix = BOT_NAME if past_msg.author.id == client.user.id else p_auth
@@ -1585,7 +1877,7 @@ async def on_message(message):
         active_user_name = VIP_MAP.get(message.author.id, getattr(message.author, 'display_name', message.author.name))
 
         web_context = ""
-        search_triggers = ["look up ", "search for ", "what is ", "what are ", "what's ", "whats ", "what movies ", "what games ", "what shows ", "who is ", "who are ", "where is ", "where are ", "when is ", "when does ", "how do ", "how to ", "how much ", "why is ", "why does ", "have you seen ", "did you see ", "can you find ", "what "]
+        search_triggers = ["search the web for ", "google ", "look up ", "search for ", "what is ", "what are ", "what's ", "whats ", "what movies ", "what games ", "what shows ", "who is ", "who are ", "where is ", "where are ", "when is ", "when does ", "how do ", "how to ", "how much ", "why is ", "why does ", "have you seen ", "did you see ", "can you find ", "what "]
         blacklist = ["up", "good", "doing", "going on", "happening", "wrong", "matter", "you mean", "about", "the point", "are you", "you doing", "did you say", "do you want"]
         
         for trigger in search_triggers:
@@ -1597,13 +1889,72 @@ async def on_message(message):
                     web_context = await client.loop.run_in_executor(None, get_web_context, final_query)
                     break
 
-        async with message.channel.typing():
-            reply, _ = await client.loop.run_in_executor(
-                None, functools.partial(get_ai_reply, active_user_name, history_log, memories, soul, target_msg, "normal", web_context)
+        img_data = None
+        mime_type = None
+        if message.attachments:
+            att = message.attachments[0]
+            if att.content_type and att.content_type.startswith('image/'):
+                try:
+                    raw_bytes = await att.read()
+                    img_data = base64.b64encode(raw_bytes).decode('utf-8')
+                    mime_type = att.content_type
+                except: pass
+                
+        allow_think = (ACTIVE_MODEL and "gemma-4" in ACTIVE_MODEL and any(t in target_msg.lower() for t in ["think about", "really think", "think hard", "solve"]))
+
+        if allow_think and SHOW_THINKING:
+            live_queue = queue.Queue()
+            reply_msg = await message.channel.send("💭 *Thinking...*")
+            
+            brain_task = client.loop.run_in_executor(
+                None, functools.partial(get_ai_reply, active_user_name, history_log, memories, soul, target_msg, "normal", web_context, img_data, mime_type, live_queue)
             )
-        if reply: 
-            display_reply = re.sub(r'\[.*?\]', '', reply).strip()
-            await message.channel.send(display_reply)
+            
+            buffer = ""
+            last_edit_time = time.time()
+            
+            while True:
+                try:
+                    chunk = live_queue.get_nowait()
+                except queue.Empty:
+                    if brain_task.done():
+                        break
+                    await asyncio.sleep(0.1)
+                    continue
+                    
+                if chunk is None:
+                    break
+                    
+                buffer += chunk
+                
+                if time.time() - last_edit_time > 1.5:
+                    display_text = buffer[-1900:].replace("```", "")
+                    try:
+                        await reply_msg.edit(content=f"💭 *Thinking...*\n```md\n{display_text}\n```")
+                        last_edit_time = time.time()
+                    except: pass
+                        
+            final_reply, _ = await brain_task
+            if final_reply:
+                display_reply = re.sub(r'\[.*?\]', '', final_reply).strip()
+                if not display_reply: display_reply = "*stares silently*"
+                try:
+                    await reply_msg.edit(content=display_reply)
+                except Exception as e:
+                    dprint("events", f"[ERROR] Failed to send text: {e}")
+        else:
+            async with message.channel.typing():
+                reply, _ = await client.loop.run_in_executor(
+                    None, functools.partial(get_ai_reply, active_user_name, history_log, memories, soul, target_msg, "normal", web_context, img_data, mime_type)
+                )
+            if reply: 
+                display_reply = re.sub(r'\[.*?\]', '', reply).strip()
+                if not display_reply:
+                    display_reply = "*stares silently*"
+                try:
+                    await message.channel.send(display_reply)
+                except Exception as e:
+                    dprint("events", f"[ERROR] Failed to send text: {e}")
 
     found_game = next((word for word in AUTO_REPLIES.keys() if word in content_lower), None)
     if found_game and not should_reply:
