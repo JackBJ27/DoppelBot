@@ -80,12 +80,15 @@ def load_config():
 
     default_config = {
         'bot_name': 'DoppelBot',
-        'available_models': ['gemma-3-27b-it', 'gemma-3-12b-it', 'gemma-3-4b-it', 'gemma-3-1b-it', 'gemma-2-27b-it', 'gemma-2-9b-it', 'gemini-2.5-flash'],
-        'ai_models': ['gemma-3-27b-it', 'gemma-3-12b-it', 'gemma-3-4b-it', 'gemma-3-1b-it', 'gemma-2-27b-it', 'gemma-2-9b-it', 'gemini-2.5-flash'],
+        'available_models': ['gemma-4-31b-it', 'gemma-4-26b-a4b-it', 'gemma-4-e4b-it', 'gemma-4-e2b-it', 'gemma-3-27b-it', 'gemma-3-12b-it', 'gemma-3-4b-it', 'gemma-3-1b-it', 'gemma-2-27b-it', 'gemma-2-9b-it', 'gemini-2.5-flash'],
+        'ai_models': ['gemma-4-31b-it', 'gemma-4-26b-a4b-it', 'gemma-4-e4b-it', 'gemma-4-e2b-it', 'gemma-3-27b-it', 'gemma-3-12b-it', 'gemma-3-4b-it', 'gemma-3-1b-it', 'gemma-2-27b-it', 'gemma-2-9b-it', 'gemini-2.5-flash'],
         'enable_voice': True,
         'allow_dm_voice': True,
         'enable_thinking_music': False,
+        'enable_filler_audio': True,
+        'overlap_filler_music': False,
         'dynamic_emotions': False,
+        'show_thinking': True,
         'enable_stats': True,
         'auto_chat': True,
         'auto_join_vc': True,
@@ -144,9 +147,11 @@ def load_config():
         del user_config['council_channel_id']
         needs_save = True
 
-    for key, value in default_config.items():
-        if key not in user_config:
-            user_config[key] = value
+    for model in default_config['available_models']:
+        if model not in user_config['available_models']:
+            user_config['available_models'].insert(0, model)
+            if model not in user_config['ai_models']:
+                user_config['ai_models'].insert(0, model)
             needs_save = True
 
     if 'profiles' not in user_config or not user_config['profiles']:
@@ -457,6 +462,7 @@ class App(ctk.CTk):
             self.config_data['auto_chat'] = self.var_autochat.get()
             self.config_data['enable_websearch'] = self.var_websearch.get()
             self.config_data['enable_debug'] = self.var_debug.get()
+            self.config_data['show_thinking'] = self.var_show_thinking.get()
             self.config_data['temperature'] = float(self.slider_temp.get())
             self.config_data['ephemeral_commands'] = self.var_ephemeral.get()
             self.config_data['enabled_commands'] = [c for c, var in self.cmd_vars.items() if var.get()]
@@ -486,6 +492,8 @@ class App(ctk.CTk):
             self.config_data['auto_join_vc'] = self.var_autojoin.get()
             self.config_data['allow_dm_voice'] = self.var_dm_voice.get()
             self.config_data['enable_thinking_music'] = self.var_thinking_music.get()
+            self.config_data['enable_filler_audio'] = self.var_filler_audio.get()
+            self.config_data['overlap_filler_music'] = self.var_overlap.get()
             self.config_data['dynamic_emotions'] = self.var_dyn_emotions.get()
             self.config_data['enabled_emotions'] = {emo: var.get() for emo, var in self.emo_vars.items()}
             self.config_data['debug_modules'] = {mod: var.get() for mod, var in self.debug_vars.items()}
@@ -808,7 +816,7 @@ class App(ctk.CTk):
         
         l2 = ctk.CTkLabel(link_frame, text="Current Gemma Models List", text_color="#3B8ED0", font=INFO_FONT, cursor="hand2", fg_color=BG_FRAME)
         l2.pack(side='left')
-        l2.bind("<Button-1>", lambda e: self.open_url("https://huggingface.co/collections/google/gemma-3-release"))
+        l2.bind("<Button-1>", lambda e: self.open_url("https://huggingface.co/collections/google/gemma-4"))
         
         self.model_list_frame = ctk.CTkFrame(set_frame, fg_color=BG_FRAME)
         self.model_list_frame.pack(fill='x', padx=10)
@@ -831,14 +839,17 @@ class App(ctk.CTk):
         self.var_autochat = ctk.BooleanVar()
         self.var_websearch = ctk.BooleanVar()
         self.var_debug = ctk.BooleanVar()
+        self.var_show_thinking = ctk.BooleanVar()
         
-        chat_sw = ctk.CTkSwitch(tog_frame, text='Allow Auto-Chat (Bot will randomly talk on its own)', variable=self.var_autochat, font=APP_FONT, bg_color=BG_SCROLL, fg_color=UNSELECTED_TRACK)
+        chat_sw = ctk.CTkSwitch(tog_frame, text='Allow Auto-Chat', variable=self.var_autochat, font=APP_FONT, bg_color=BG_SCROLL, fg_color=UNSELECTED_TRACK)
         chat_sw.pack(side='left', padx=10)
-        web_sw = ctk.CTkSwitch(tog_frame, text='Allow Web Search (Bot can google things if asked)', variable=self.var_websearch, font=APP_FONT, bg_color=BG_SCROLL, fg_color=UNSELECTED_TRACK)
+        web_sw = ctk.CTkSwitch(tog_frame, text='Allow Web Search', variable=self.var_websearch, font=APP_FONT, bg_color=BG_SCROLL, fg_color=UNSELECTED_TRACK)
         web_sw.pack(side='left', padx=10)
         dbg_sw = ctk.CTkSwitch(tog_frame, text='Terminal Debug Logging', variable=self.var_debug, font=APP_FONT, bg_color=BG_SCROLL, fg_color=UNSELECTED_TRACK)
         dbg_sw.pack(side='left', padx=10)
-        self.switches.extend([chat_sw, web_sw, dbg_sw])
+        think_sw = ctk.CTkSwitch(tog_frame, text='Show AI Thinking', variable=self.var_show_thinking, font=APP_FONT, bg_color=BG_SCROLL, fg_color=UNSELECTED_TRACK)
+        think_sw.pack(side='left', padx=10)
+        self.switches.extend([chat_sw, web_sw, dbg_sw, think_sw])
 
         ctk.CTkLabel(scroll, text='Bot Creativity (Left = Logical & Boring, Right = Unhinged & Creative)', font=BOLD_FONT, fg_color=BG_SCROLL).pack(pady=(15,0))
         self.slider_temp = ctk.CTkSlider(scroll, from_=0.1, to=1.5, number_of_steps=14, bg_color=BG_SCROLL, fg_color=UNSELECTED_TRACK)
@@ -1188,6 +1199,8 @@ class App(ctk.CTk):
         self.var_autojoin = ctk.BooleanVar()
         self.var_dm_voice = ctk.BooleanVar()
         self.var_thinking_music = ctk.BooleanVar()
+        self.var_filler_audio = ctk.BooleanVar()
+        self.var_overlap = ctk.BooleanVar()
         self.var_dyn_emotions = ctk.BooleanVar()
         
         vf = ctk.CTkFrame(scroll, fg_color=BG_SCROLL)
@@ -1205,6 +1218,14 @@ class App(ctk.CTk):
         tm_sw = ctk.CTkSwitch(scroll, text='Play Thinking Music (Plays thinking.wav from voice_references folder)', variable=self.var_thinking_music, font=APP_FONT, bg_color=BG_SCROLL, fg_color=UNSELECTED_TRACK)
         tm_sw.pack(pady=(0, 15))
         self.switches.append(tm_sw)
+
+        fa_sw = ctk.CTkSwitch(scroll, text='Play Filler Audio (Ums, Ahhs) while thinking', variable=self.var_filler_audio, font=APP_FONT, bg_color=BG_SCROLL, fg_color=UNSELECTED_TRACK)
+        fa_sw.pack(pady=(0, 15))
+        self.switches.append(fa_sw)
+
+        ov_sw = ctk.CTkSwitch(scroll, text='Overlap Filler Audio & Thinking Music', variable=self.var_overlap, font=APP_FONT, bg_color=BG_SCROLL, fg_color=UNSELECTED_TRACK)
+        ov_sw.pack(pady=(0, 15))
+        self.switches.append(ov_sw)
         
         dyn_sw = ctk.CTkSwitch(scroll, text='Change emotions mid-sentence (Dynamic Emotions)', variable=self.var_dyn_emotions, font=APP_FONT, bg_color=BG_SCROLL, fg_color=UNSELECTED_TRACK)
         dyn_sw.pack(pady=(0, 15))
@@ -1358,7 +1379,9 @@ class App(ctk.CTk):
         self.make_smart_textbox(self.advanced_text)
         self.advanced_text.pack(pady=10, fill='both', expand=True, padx=10)
 
-def check_for_updates(self):
+    def check_for_updates(self):
+        if self.config_data.get('ignore_updates', False): return
+        
         repo_path = self.config_data.get('github_repo_url', 'JackBJ27/DoppelBot').strip().strip('/')
         if not repo_path or '/' not in repo_path: return
             
@@ -1367,12 +1390,13 @@ def check_for_updates(self):
             latest_sha = latest['sha'][:7]
             commit_msg = latest['commit']['message'].split('\n')[0]
             
+            if latest_sha == self.config_data.get('ignored_update_hash', ''): return
+            
             saved_sha = self.config_data.get('last_commit_hash', '')
             
             if latest_sha != saved_sha and saved_sha != '':
                 self.prompt_update(repo_path, latest_sha, commit_msg)
             elif saved_sha == '':
-                # First time running this feature, save it silently so it doesn't nag immediately
                 self.config_data['last_commit_hash'] = latest_sha
                 save_config(self.config_data)
         except: pass
@@ -1380,13 +1404,21 @@ def check_for_updates(self):
     def prompt_update(self, repo_path, latest_sha, commit_msg):
         popup = ctk.CTkToplevel(self)
         popup.title('Update Available!')
-        popup.geometry('500x250')
+        popup.geometry('500x320')
         popup.attributes('-topmost', True)
         popup.grab_set()
         
         msg = f"A new DoppelBot update was found on GitHub!\n\nLatest Commit: {commit_msg}\n\nWould you like to download and install this update now?"
         lbl = ctk.CTkLabel(popup, text=msg, font=APP_FONT, wraplength=450, fg_color=BG_WINDOW)
-        lbl.pack(pady=20, padx=20)
+        lbl.pack(pady=(20, 10), padx=20)
+        
+        var_skip_this = ctk.BooleanVar()
+        chk_skip_this = ctk.CTkCheckBox(popup, text="Don't show me this again until the next update", variable=var_skip_this, font=INFO_FONT, bg_color=BG_WINDOW, border_color=CHECK_BORDER)
+        chk_skip_this.pack(anchor='w', padx=40, pady=5)
+
+        var_skip_all = ctk.BooleanVar()
+        chk_skip_all = ctk.CTkCheckBox(popup, text="Don't show me this again", variable=var_skip_all, font=INFO_FONT, bg_color=BG_WINDOW, border_color=CHECK_BORDER)
+        chk_skip_all.pack(anchor='w', padx=40, pady=(0, 15))
         
         btn_frame = ctk.CTkFrame(popup, fg_color=BG_WINDOW)
         btn_frame.pack(pady=10)
@@ -1395,10 +1427,19 @@ def check_for_updates(self):
             popup.destroy()
             self.perform_github_update(repo_path, latest_sha)
             
+        def decline_update():
+            if var_skip_all.get():
+                self.config_data['ignore_updates'] = True
+                save_config(self.config_data)
+            elif var_skip_this.get():
+                self.config_data['ignored_update_hash'] = latest_sha
+                save_config(self.config_data)
+            popup.destroy()
+            
         btn_yes = ctk.CTkButton(btn_frame, text='Yes, Update Now', font=BOLD_FONT, fg_color='#2FA572', hover_color='#1E7A52', command=do_update)
         btn_yes.pack(side='left', padx=10)
         
-        btn_no = ctk.CTkButton(btn_frame, text='Not Right Now', font=BOLD_FONT, fg_color='#C0392B', hover_color='#922B21', command=popup.destroy)
+        btn_no = ctk.CTkButton(btn_frame, text='Not Right Now', font=BOLD_FONT, fg_color='#C0392B', hover_color='#922B21', command=decline_update)
         btn_no.pack(side='left', padx=10)
 
     def fetch_versions(self):
@@ -1756,6 +1797,7 @@ CREDITS & LICENSING:
         self.var_autochat.set(self.config_data.get('auto_chat', True))
         self.var_websearch.set(self.config_data.get('enable_websearch', True))
         self.var_debug.set(self.config_data.get('enable_debug', True))
+        self.var_show_thinking.set(self.config_data.get('show_thinking', True))
         self.slider_temp.set(self.config_data.get('temperature', 0.85))
 
         self.access_menu.set(self.config_data.get('access_mode', 'Friends Only (VIPs)'))
@@ -1797,6 +1839,8 @@ CREDITS & LICENSING:
         self.var_autojoin.set(self.config_data.get('auto_join_vc', True))
         self.var_dm_voice.set(self.config_data.get('allow_dm_voice', True))
         self.var_thinking_music.set(self.config_data.get('enable_thinking_music', False))
+        self.var_filler_audio.set(self.config_data.get('enable_filler_audio', True))
+        self.var_overlap.set(self.config_data.get('overlap_filler_music', False))
         
         if hasattr(self, 'var_dyn_emotions'):
             self.var_dyn_emotions.set(self.config_data.get('dynamic_emotions', False))
