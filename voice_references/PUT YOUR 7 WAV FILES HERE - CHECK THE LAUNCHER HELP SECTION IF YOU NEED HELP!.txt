@@ -19,3 +19,16 @@ warming_up.wav
 wait.wav
 still_loading.wav
 almost_there.wav
+
+
+you can ALSO put filler voice clips in here to
+have it say occasionally if the loading between chunks of audio
+is a bit long
+(they must be named these)
+------
+sigh.wav
+big_sigh.wav
+hmmm.wav
+um.wav
+uhhh.wav
+chatter.wav
