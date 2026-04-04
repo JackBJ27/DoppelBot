@@ -40,14 +40,15 @@ def save_env(discord, google, hf):
 
 def load_config():
     default_config = {
-        'bot_name': 'DoppelBot', 'available_models': ['gemma-3-27b-it', 'gemini-2.5-flash'], 'ai_models': [],
+        'bot_name': 'DoppelBot', 'available_models': ['gemma-4-31b-it', 'gemma-4-26b-a4b-it', 'gemma-4-e4b-it', 'gemma-4-e2b-it', 'gemma-3-27b-it', 'gemini-2.5-flash'], 'ai_models': [],
+        'show_thinking': True,
         'profiles': {'Default': {
             'auto_chat_behaviors': 'post a brief casual observation, tease them lightly, say something cryptic, ask an unhinged question'
         }}, 'active_profile': 'Default', 'custom_stats': [], 'favorite_emojis': [],
         'emoji_toggles': {}, 'banned_inputs': [], 'removed_words': [], 'enabled_emotions': {}, 'debug_modules': {},
         'word_replacements': {}, 'voice_corrections': {}, 'tts_pronunciations': {}, 'auto_replies': {},
         'vip_map': {}, 'allowed_roles': {}, 'allowed_text_channels': {}, 'allowed_vc_channels': {}, 'enabled_commands': [],
-        'enable_thinking_music': False, 'dynamic_emotions': False, 'theme': 'Dark', 'ui_scaling': 1.0, 'accent_color': '#d1d1d1', 'github_repo_url': 'JackBJ27/DoppelBot'
+        'enable_thinking_music': False, 'enable_filler_audio': True, 'overlap_filler_music': False, 'dynamic_emotions': False, 'theme': 'Dark', 'ui_scaling': 1.0, 'accent_color': '#d1d1d1', 'github_repo_url': 'JackBJ27/DoppelBot'
     }
     config = {}
     if os.path.exists(CONFIG_FILE):
@@ -55,8 +56,13 @@ def load_config():
             with open(CONFIG_FILE, 'r') as f: config = json.load(f)
         except: pass
     
-    for k, v in default_config.items():
-        if k not in config: config[k] = v
+    for model in default_config['available_models']:
+        if model not in config.get('available_models', []):
+            if 'available_models' not in config: config['available_models'] = []
+            config['available_models'].insert(0, model)
+            if 'ai_models' not in config: config['ai_models'] = []
+            if model not in config['ai_models']:
+                config['ai_models'].insert(0, model)
     if not config.get('profiles'): config['profiles'] = {'Default': {}}
     return config
 
@@ -238,10 +244,11 @@ HTML_TEMPLATE = r"""
                                 <input type="text" class="ctk-input" v-model="config.primary_channel_id">
                             </div>
 
-                            <div class="d-flex gap-4 mb-4">
+                            <div class="d-flex flex-wrap gap-4 mb-4">
                                 <label class="d-flex align-items-center"><label class="switch"><input type="checkbox" v-model="config.auto_chat"><span class="slider"></span></label> Allow Auto-Chat</label>
                                 <label class="d-flex align-items-center"><label class="switch"><input type="checkbox" v-model="config.enable_websearch"><span class="slider"></span></label> Web Search</label>
                                 <label class="d-flex align-items-center"><label class="switch"><input type="checkbox" v-model="config.enable_debug"><span class="slider"></span></label> Terminal Debug Logging</label>
+                                <label class="d-flex align-items-center"><label class="switch"><input type="checkbox" v-model="config.show_thinking"><span class="slider"></span></label> Show AI Thinking</label>
                             </div>
 
                             <div class="mb-4">
@@ -334,11 +341,13 @@ HTML_TEMPLATE = r"""
 
                         <div class="tab-pane fade" id="tab3">
                             <div class="ctk-title">Voice Module Settings</div>
-                            <div class="d-flex gap-4 mt-3 mb-4">
+                            <div class="d-flex flex-wrap gap-4 mt-3 mb-4">
                                 <label class="d-flex align-items-center"><label class="switch"><input type="checkbox" v-model="config.enable_voice"><span class="slider"></span></label> Enable Voice</label>
                                 <label class="d-flex align-items-center"><label class="switch"><input type="checkbox" v-model="config.auto_join_vc"><span class="slider"></span></label> Auto-Join VC</label>
                                 <label class="d-flex align-items-center"><label class="switch"><input type="checkbox" v-model="config.allow_dm_voice"><span class="slider"></span></label> Allow DM-to-Voice</label>
                                 <label class="d-flex align-items-center"><label class="switch"><input type="checkbox" v-model="config.enable_thinking_music"><span class="slider"></span></label> Thinking Music</label>
+                                <label class="d-flex align-items-center"><label class="switch"><input type="checkbox" v-model="config.enable_filler_audio"><span class="slider"></span></label> Filler Audio (Ums/Ahs)</label>
+                                <label class="d-flex align-items-center"><label class="switch"><input type="checkbox" v-model="config.overlap_filler_music"><span class="slider"></span></label> Overlap Filler & Music</label>
                                 <label class="d-flex align-items-center"><label class="switch"><input type="checkbox" v-model="config.dynamic_emotions"><span class="slider"></span></label> Dynamic Emotions</label>
                             </div>
 
@@ -514,7 +523,7 @@ HTML_TEMPLATE = r"""
                     isSyncing: false,
                     loading: true,
                     env: { DISCORD_TOKEN: '', GOOGLE_API_KEYS: '', HF_TOKEN: '' },
-                    config: { profiles: {'Default': {}}, active_profile: 'Default', available_models: [], ai_models: [], banned_inputs: [], removed_words: [], enabled_emotions: {}, debug_modules: {}, word_replacements: {}, vip_map: {}, allowed_roles: {}, allowed_text_channels: {}, allowed_vc_channels: {}, voice_corrections: {}, tts_pronunciations: {}, auto_replies: {}, custom_stats: [], theme: 'Dark', ui_scaling: 1.0, accent_color: '#d1d1d1', enable_thinking_music: false, dynamic_emotions: false },
+                    config: { profiles: {'Default': {}}, active_profile: 'Default', available_models: [], ai_models: [], banned_inputs: [], removed_words: [], enabled_emotions: {}, debug_modules: {}, word_replacements: {}, vip_map: {}, allowed_roles: {}, allowed_text_channels: {}, allowed_vc_channels: {}, voice_corrections: {}, tts_pronunciations: {}, auto_replies: {}, custom_stats: [], theme: 'Dark', ui_scaling: 1.0, accent_color: '#d1d1d1', enable_thinking_music: false, enable_filler_audio: true, overlap_filler_music: false, dynamic_emotions: false },
                     lastMtime: 0,
                     syncStatus: "Synced",
                     saveTimeout: null,
@@ -654,7 +663,7 @@ HTML_TEMPLATE = r"""
                             msg_brain_disconnected: 'brain disconnected.',
                             msg_join_vc: 'hey whats up',
                             msg_stop_talking: 'my bad.',
-                            msg_vocal_cords_ready: 'vocal cords ready.'
+                            msg_vocal_cords_ready: 'vocal cords ready.',
                             msg_leave_vc: 'aw man, really? you want me to leave? fine.'
                         };
                         this.config.active_profile = name;
