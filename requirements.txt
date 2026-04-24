@@ -15,3 +15,6 @@ torch
 torchaudio
 transformers
 pocket-tts
+flask
+keyring
+psutil
