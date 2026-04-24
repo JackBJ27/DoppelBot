@@ -80,8 +80,8 @@ def load_config():
 
     default_config = {
         'bot_name': 'DoppelBot',
-        'available_models': ['gemma-4-31b-it', 'gemma-4-26b-a4b-it', 'gemma-4-e4b-it', 'gemma-4-e2b-it', 'gemma-3-27b-it', 'gemma-3-12b-it', 'gemma-3-4b-it', 'gemma-3-1b-it', 'gemma-2-27b-it', 'gemma-2-9b-it', 'gemini-2.5-flash'],
-        'ai_models': ['gemma-4-31b-it', 'gemma-4-26b-a4b-it', 'gemma-4-e4b-it', 'gemma-4-e2b-it', 'gemma-3-27b-it', 'gemma-3-12b-it', 'gemma-3-4b-it', 'gemma-3-1b-it', 'gemma-2-27b-it', 'gemma-2-9b-it', 'gemini-2.5-flash'],
+        'available_models': ['gemma-4-31b-it', 'gemma-4-26b-a4b-it', 'gemma-4-e4b-it', 'gemma-4-e2b-it', 'gemini-2.5-flash'],
+        'ai_models': ['gemma-4-31b-it', 'gemma-4-26b-a4b-it', 'gemma-4-e4b-it', 'gemma-4-e2b-it', 'gemini-2.5-flash'],
         'enable_voice': True,
         'allow_dm_voice': True,
         'enable_thinking_music': False,
@@ -141,10 +141,11 @@ def load_config():
         del user_config['allowed_channels']
         needs_save = True
 
-    if 'council_channel_id' in user_config:
-        if not user_config.get('primary_channel_id'):
-            user_config['primary_channel_id'] = user_config['council_channel_id']
-        del user_config['council_channel_id']
+    if 'available_models' not in user_config:
+        user_config['available_models'] = []
+        needs_save = True
+    if 'ai_models' not in user_config:
+        user_config['ai_models'] = []
         needs_save = True
 
     for model in default_config['available_models']:
@@ -1337,19 +1338,11 @@ class App(ctk.CTk):
         upd_frame = ctk.CTkFrame(scroll, fg_color=BG_FRAME)
         upd_frame.pack(fill='x', padx=20, pady=5)
         
-        self.entry_repo = ctk.CTkEntry(upd_frame, placeholder_text='GitHub Repo (Format -> Username/Repository)', font=APP_FONT, fg_color=TEXT_BG)
-        self.entry_repo.pack(side='left', fill='x', expand=True, padx=(0, 10))
+        repo_lbl = ctk.CTkLabel(upd_frame, text='Repository: JackBJ27/DoppelBot', font=BOLD_FONT, fg_color=BG_FRAME)
+        repo_lbl.pack(side='left', padx=15, pady=15)
         
-        btn_fetch = ctk.CTkButton(upd_frame, text='Fetch Versions', font=BOLD_FONT, command=self.fetch_versions)
-        btn_fetch.pack(side='left', padx=(0, 10))
-        self.start_btns.append(btn_fetch)
-
-        self.version_menu = ctk.CTkOptionMenu(upd_frame, values=['main'], font=APP_FONT)
-        self.version_menu.pack(side='left', padx=(0, 10))
-        self.option_menus.append(self.version_menu)
-        
-        btn_update = ctk.CTkButton(upd_frame, text='Update to Version', font=BOLD_FONT, command=self.update_from_github)
-        btn_update.pack(side='right')
+        btn_update = ctk.CTkButton(upd_frame, text='Download & Install Latest Update', font=BOLD_FONT, command=self.update_latest_from_github)
+        btn_update.pack(side='right', padx=15, pady=15)
         self.save_btns.append(btn_update)
 
         ctk.CTkLabel(scroll, text=' - ' * 20, text_color=('gray20', 'gray75'), fg_color=BG_SCROLL).pack(pady=20)
@@ -1442,42 +1435,14 @@ class App(ctk.CTk):
         btn_no = ctk.CTkButton(btn_frame, text='Not Right Now', font=BOLD_FONT, fg_color='#C0392B', hover_color='#922B21', command=decline_update)
         btn_no.pack(side='left', padx=10)
 
-    def fetch_versions(self):
-        repo_path = self.entry_repo.get().strip().strip('/')
-        if not repo_path or '/' not in repo_path:
-            show_popup('Error', 'Please enter your GitHub repo format as Username/Repository.\nExample: JackBJ27/DoppelBot')
-            return
-            
+    def update_latest_from_github(self):
+        repo_path = 'JackBJ27/DoppelBot'
         try:
-            commits = requests.get(f'https://api.github.com/repos/{repo_path}/commits', timeout=5).json()
-            versions = []
-            
-            if isinstance(commits, list):
-                for c in commits[:15]: # Get last 15 commits to keep the menu clean
-                    sha = c['sha'][:7]
-                    msg = c['commit']['message'].split('\n')[0][:40] 
-                    versions.append(f"{sha} - {msg}")
-            
-            if not versions: versions = ['main']
-            
-            self.version_menu.configure(values=versions)
-            self.version_menu.set(versions[0])
-            show_popup('Success', f'Found {len(versions)} recent commits in {repo_path}!')
-        except:
-            show_popup('Error', 'Failed to fetch commits. Check repo name or rate limits.')
-            self.version_menu.configure(values=['main'])
-            self.version_menu.set('main')
-
-    def update_from_github(self):
-        repo_path = self.entry_repo.get().strip().strip('/')
-        if not repo_path or '/' not in repo_path:
-            show_popup('Error', 'Please enter your GitHub repo format as Username/Repository.\nExample: JackBJ27/DoppelBot')
-            return
-            
-        raw_version = self.version_menu.get()
-        version = raw_version.split(' - ')[0] if ' - ' in raw_version else raw_version
-        
-        self.perform_github_update(repo_path, version)
+            latest = requests.get(f'https://api.github.com/repos/{repo_path}/commits/main', timeout=5).json()
+            latest_sha = latest['sha'][:7]
+            self.perform_github_update(repo_path, latest_sha)
+        except Exception as e:
+            show_popup('Error', f'Failed to check for latest update:\n{e}')
 
     def perform_github_update(self, repo_path, version):
         self.config_data['github_repo_url'] = repo_path
@@ -1538,7 +1503,11 @@ class App(ctk.CTk):
                 if 'voice_references' in target_path and target_path.endswith('.wav'): continue
                 if 'emoji_cache' in target_path: continue
 
-                abs_target = os.path.join(SCRIPT_DIR, target_path)
+                abs_target = os.path.abspath(os.path.join(SCRIPT_DIR, target_path))
+                
+                if not abs_target.startswith(os.path.abspath(SCRIPT_DIR)):
+                    continue 
+
                 os.makedirs(os.path.dirname(abs_target), exist_ok=True)
                 
                 with z.open(file_info) as source, open(abs_target, 'wb') as target:
@@ -1877,10 +1846,6 @@ CREDITS & LICENSING:
         self.refresh_model_list()
         self.load_advanced_file(self.file_selector.get())
         
-        if hasattr(self, 'entry_repo'):
-            self.entry_repo.delete(0, 'end')
-            self.entry_repo.insert(0, self.config_data.get('github_repo_url', 'JackBJ27/DoppelBot'))
-
         if full_reload:
             self.refresh_server_list()
         
