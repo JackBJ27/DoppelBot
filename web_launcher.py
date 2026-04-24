@@ -8,11 +8,28 @@ from flask import Flask, render_template_string, request, jsonify
 
 app = Flask(__name__)
 
+@app.before_request
+def verify_origin():
+    if request.method in ['POST', 'PUT', 'DELETE']:
+        origin = request.headers.get('Origin')
+        referer = request.headers.get('Referer')
+        
+        valid_sources = ['http://127.0.0.1:5000', 'http://localhost:5000']
+        
+        is_valid_origin = origin in valid_sources if origin else False
+        is_valid_referer = any(referer.startswith(src) for src in valid_sources) if referer else False
+        
+        if not (is_valid_origin or is_valid_referer):
+            return jsonify({'error': 'Unauthorized origin or missing headers. Nice try though.'}), 403
+
 @app.after_request
 def add_header(r):
     r.headers["Cache-Control"] = "no-cache, no-store, must-revalidate, public, max-age=0"
     r.headers["Pragma"] = "no-cache"
     r.headers["Expires"] = "0"
+    r.headers["X-Content-Type-Options"] = "nosniff"
+    r.headers["X-Frame-Options"] = "DENY"
+    r.headers["Content-Security-Policy"] = "default-src 'self'; script-src 'self' 'unsafe-inline' https://unpkg.com https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://fonts.googleapis.com; font-src https://fonts.gstatic.com;"
     return r
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -33,6 +50,16 @@ def load_env():
         'HF_TOKEN': keyring.get_password("DoppelBot", "HF_TOKEN") or ''
     }
 
+def get_masked_credentials():
+    creds = load_env()
+    masked = {}
+    for key, val in creds.items():
+        if val:
+            masked[key] = '*' * 15 + val[-4:] if len(val) > 4 else '***'
+        else:
+            masked[key] = ''
+    return masked
+
 def save_env(discord, google, hf):
     if discord: keyring.set_password("DoppelBot", "DISCORD_TOKEN", discord)
     if google: keyring.set_password("DoppelBot", "GOOGLE_API_KEYS", google)
@@ -40,7 +67,7 @@ def save_env(discord, google, hf):
 
 def load_config():
     default_config = {
-        'bot_name': 'DoppelBot', 'available_models': ['gemma-4-31b-it', 'gemma-4-26b-a4b-it', 'gemma-4-e4b-it', 'gemma-4-e2b-it', 'gemma-3-27b-it', 'gemini-2.5-flash'], 'ai_models': [],
+        'bot_name': 'DoppelBot', 'available_models': ['gemma-4-31b-it', 'gemma-4-26b-a4b-it', 'gemma-4-e4b-it', 'gemma-4-e2b-it', 'gemini-2.5-flash'], 'ai_models': [],
         'show_thinking': True,
         'profiles': {'Default': {
             'auto_chat_behaviors': 'post a brief casual observation, tease them lightly, say something cryptic, ask an unhinged question'
@@ -401,13 +428,9 @@ HTML_TEMPLATE = r"""
                             </div>
 
                             <div class="ctk-title mt-4">Cloud Updater</div>
-                            <div class="ctk-frame d-flex gap-2 mb-4">
-                                <input type="text" class="ctk-input flex-grow-1" v-model="config.github_repo_url" placeholder="JackBJ27/DoppelBot">
-                                <button class="ctk-btn ctk-btn-start" @click="fetchGithub">Fetch</button>
-                                <select class="ctk-input" style="width: 150px;" v-model="gitVersion">
-                                    <option v-for="v in gitVersions" :key="v">{{ v }}</option>
-                                </select>
-                                <button class="ctk-btn ctk-btn-save" @click="updateGithub">Update</button>
+                            <div class="ctk-frame d-flex justify-content-between align-items-center mb-4 p-3">
+                                <span class="ctk-title mb-0" style="font-size: 1.1rem;">Repository: JackBJ27/DoppelBot</span>
+                                <button class="ctk-btn ctk-btn-save" @click="updateGithubLatest">Download & Install Latest Update</button>
                             </div>
 
                             <div class="ctk-title mt-4">Raw File Editor</div>
@@ -695,29 +718,13 @@ HTML_TEMPLATE = r"""
                     }
                 },
 
-                async fetchGithub() {
-                    try {
-                        const repo = this.config.github_repo_url.replace(/\/$/, '');
-                        const [tags, branches] = await Promise.all([
-                            fetch(`https://api.github.com/repos/${repo}/tags`).then(r=>r.json()),
-                            fetch(`https://api.github.com/repos/${repo}/branches`).then(r=>r.json())
-                        ]);
-                        let v = [];
-                        if(Array.isArray(tags)) v.push(...tags.map(t=>t.name));
-                        if(Array.isArray(branches)) v.push(...branches.map(b=>b.name));
-                        if(v.length) {
-                            this.gitVersions = v;
-                            this.gitVersion = v[0];
-                            alert(`Found ${v.length} versions!`);
-                        }
-                    } catch(e) { alert("Failed to fetch versions."); }
-                },
-
-                async updateGithub() {
+                async updateGithubLatest() {
+                    if(!confirm("Are you sure you want to download and install the latest update?")) return;
+                    
                     const res = await fetch('/api/github_update', {
                         method: 'POST',
                         headers: {'Content-Type': 'application/json'},
-                        body: JSON.stringify({repo: this.config.github_repo_url, version: this.gitVersion})
+                        body: JSON.stringify({version: 'main'})
                     });
                     const data = await res.json();
                     alert(data.message);
@@ -771,7 +778,7 @@ def index():
 @app.route('/api/data')
 def api_data():
     return jsonify({
-        'env': load_env(),
+        'env': get_masked_credentials(),
         'config': load_config(),
         'mtime': get_mtime(),
         'show_setup': not (os.path.exists(os.path.join(SCRIPT_DIR, "bot_brain.txt")) and os.path.getsize(os.path.join(SCRIPT_DIR, "bot_brain.txt")) > 10)
@@ -780,7 +787,17 @@ def api_data():
 @app.route('/api/save', methods=['POST'])
 def api_save():
     data = request.json
-    save_env(data['env'].get('DISCORD_TOKEN',''), data['env'].get('GOOGLE_API_KEYS',''), data['env'].get('HF_TOKEN',''))
+    current_creds = load_env()
+    
+    new_d = str(data['env'].get('DISCORD_TOKEN') or '')
+    new_g = str(data['env'].get('GOOGLE_API_KEYS') or '')
+    new_h = str(data['env'].get('HF_TOKEN') or '')
+    
+    d_token = new_d if '*' not in new_d and new_d != '' else current_creds['DISCORD_TOKEN']
+    g_token = new_g if '*' not in new_g and new_g != '' else current_creds['GOOGLE_API_KEYS']
+    h_token = new_h if '*' not in new_h and new_h != '' else current_creds['HF_TOKEN']
+
+    save_env(d_token, g_token, h_token)
     save_config(data['config'])
     return jsonify({'success': True, 'mtime': get_mtime()})
 
@@ -819,8 +836,7 @@ def api_run_script():
             except: pass
             
     if sys.platform.startswith('win'):
-        cmd = f'start "DoppelBot Web Terminal" cmd /k "py -3.13 {script}"'
-        subprocess.Popen(cmd, shell=True)
+        subprocess.Popen(['cmd.exe', '/c', 'start', '"DoppelBot Web Terminal"', 'cmd.exe', '/k', f'py -3.13 {script}'])
     return jsonify({'success': True})
 
 @app.route('/api/verify_keys', methods=['POST'])
@@ -848,7 +864,7 @@ def api_verify():
 
 @app.route('/api/github_update', methods=['POST'])
 def api_github():
-    repo = request.json.get('repo', '').strip().strip('/')
+    repo = 'JackBJ27/DoppelBot'
     version = request.json.get('version', 'main')
     base_url = f'https://raw.githubusercontent.com/{repo}/{version}'
     try:
